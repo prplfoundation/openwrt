@@ -1,0 +1,299 @@
+From patchwork Wed Oct  3 01:34:14 2018
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+Subject: easymesh: add backhaul BSS support for WPS M8
+X-Patchwork-Submitter: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+X-Patchwork-Id: 978101
+Message-Id: <20181003013414.32234-1-igor.mitsyanko.os@quantenna.com>
+To: hostap@lists.infradead.org
+Cc: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>, mcarrera@quantenna.com, 
+ wouter@e2big.org, arnout@mind.be, ylu@quantenna.com
+Date: Tue,  2 Oct 2018 18:34:14 -0700
+From: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+List-Id: <hostap.lists.infradead.org>
+
+From: Ying Lu <ylu@quantenna.com>
+
+This patch adds a feature similar to the existing “Additional
+Credential attribute(s)” (extra_cred), relating to the requirements of
+Wi-Fi Alliance Multi-AP Specification v1.0 (WFA EasyMesh). These specs
+can be found at https://www.wi-fi.org/file/multi-ap-specification-v10.
+
+They mandate that a “fronthaul” BSS, that is pairing a client that has
+bit 7 of the Multi-AP Extension subelement in the Wi-Fi Alliance Vendor
+Extension attribute in the WSC M1 message, shall configure such client
+with credentials pertaining to the “backhaul” BSS. Therefore we introduce
+two new configuration options (wps_cred_processing_easymesh and
+easymesh_backhaul_ap_settings) that behave like the existing extra_cred,
+except for the additional check on the content of M1.
+
+Configuring these options will be done by a “MultiAP Agent”, an open-source
+implementation of such agent is work in progress at
+https://github.com/prplfoundation/prplMesh.
+
+Signed-off-by: Davina Lu <ylu@quantenna.com>
+Signed-off-by: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+---
+ hostapd/config_file.c    | 12 ++++++++++++
+ hostapd/hostapd.conf     | 11 +++++++++++
+ src/ap/ap_config.c       |  1 +
+ src/ap/ap_config.h       |  3 +++
+ src/wps/wps.h            | 36 ++++++++++++++++++++++++++++++++++++
+ src/wps/wps_attr_parse.c | 10 ++++++++++
+ src/wps/wps_attr_parse.h |  1 +
+ src/wps/wps_defs.h       |  9 ++++++++-
+ src/wps/wps_dev_attr.c   |  5 +++++
+ src/wps/wps_dev_attr.h   |  1 +
+ src/wps/wps_registrar.c  | 17 +++++++++++++++++
+ 11 files changed, 105 insertions(+), 1 deletion(-)
+
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -3376,6 +3376,18 @@ static int hostapd_config_fill(struct ho
+ 				   line, pos);
+ 			return 1;
+ 		}
++	} else if (os_strcmp(buf, "easymesh_backhaul_ap_settings") == 0) {
++		os_free(bss->easymesh_backhaul_ap_settings);
++		bss->easymesh_backhaul_ap_settings =
++			(u8 *) os_readfile(pos, &bss->easymesh_backhaul_ap_settings_len);
++		if (bss->easymesh_backhaul_ap_settings == NULL) {
++			wpa_printf(MSG_ERROR,
++				   "Line %d: couldn't read EASYMESH backhaul AP Settings from '%s'",
++				   line, pos);
++			return 1;
++		}
++	} else if (os_strcmp(buf, "wps_cred_processing_easymesh") == 0) {
++		bss->wps_cred_processing_easymesh = atoi(pos);
+ 	} else if (os_strcmp(buf, "upnp_iface") == 0) {
+ 		os_free(bss->upnp_iface);
+ 		bss->upnp_iface = os_strdup(pos);
+--- a/hostapd/hostapd.conf
++++ b/hostapd/hostapd.conf
+@@ -1834,6 +1834,17 @@ own_ip_addr=127.0.0.1
+ # attribute.
+ #ap_settings=hostapd.ap_settings
+ 
++# Easy mesh AP config
++# when set to 1, hostapd uses the credentials in the file specified by
++# easymesh_backhaul_ap_settings config, only for those STAs that advertise
++# "backhaul STA" in M1's EASYMESH Extension subelement.
++#wps_cred_processing_easymesh=0
++
++# Easy mesh AP backhaul BSS config
++# Used when wps_cred_processing_easymesh is set. Contains "backhaul BSS"
++# credentials.
++#easymesh_backhaul_ap_settings=hostapd.easymesh_settings
++
+ # WPS UPnP interface
+ # If set, support for external Registrars is enabled.
+ #upnp_iface=br0
+--- a/src/ap/ap_config.c
++++ b/src/ap/ap_config.c
+@@ -581,6 +581,7 @@ void hostapd_config_free_bss(struct host
+ 	os_free(conf->ap_pin);
+ 	os_free(conf->extra_cred);
+ 	os_free(conf->ap_settings);
++	os_free(conf->easymesh_backhaul_ap_settings);
+ 	os_free(conf->upnp_iface);
+ 	os_free(conf->friendly_name);
+ 	os_free(conf->manufacturer_url);
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -454,6 +454,9 @@ struct hostapd_bss_config {
+ 	int force_per_enrollee_psk;
+ 	u8 *ap_settings;
+ 	size_t ap_settings_len;
++	u8 *easymesh_backhaul_ap_settings;
++	size_t easymesh_backhaul_ap_settings_len;
++	int wps_cred_processing_easymesh;
+ 	char *upnp_iface;
+ 	char *friendly_name;
+ 	char *manufacturer_url;
+--- a/src/wps/wps.h
++++ b/src/wps/wps.h
+@@ -100,6 +100,7 @@ struct wps_device_data {
+ 	struct wpabuf *vendor_ext[MAX_WPS_VENDOR_EXTENSIONS];
+ 
+ 	int p2p;
++	u8 easymesh_ext;
+ };
+ 
+ /**
+@@ -395,6 +396,16 @@ struct wps_registrar_config {
+ 	 * PSK is set for a network.
+ 	 */
+ 	int force_per_enrollee_psk;
++
++	/**
++	 * wps_cred_processing_easymesh: build credential with backhaul BSS
++	 *
++	 * This option can be used to disable internal code that builds
++	 * Credential attribute into M8 based on the current network
++	 * configuration and Enrollee capabilities. The extra_cred data will
++	 * then be used as the Credential(s).
++	 */
++	int wps_cred_processing_easymesh;
+ };
+ 
+ 
+@@ -799,6 +810,31 @@ struct wps_context {
+ 	struct wpabuf *ap_nfc_dh_pubkey;
+ 	struct wpabuf *ap_nfc_dh_privkey;
+ 	struct wpabuf *ap_nfc_dev_pw;
++
++	/**
++	 * wps_cred_processing_easymesh: build credential with backhaul BSS
++	 *
++	 * This option can be used to disable internal code that builds
++	 * Credential attribute into M8 based on the current network
++	 * configuration and Enrollee capabilities. The extra_cred data will
++	 * then be used as the Credential(s).
++	 */
++	int wps_cred_processing_easymesh;
++
++	/**
++	 * easymesh_backhaul_ap_settings: EASY mesh backhaul BSS config
++	 *
++	 * This optional data (set to NULL to disable) can be used to add
++	 * Credential attribute(s) for other networks into M8. If
++	 * wps_cred_processing_easymesh is set, this will also override the automatically
++	 * generated Credential attribute.
++	 */
++	const u8 *easymesh_backhaul_ap_settings;
++
++	/**
++	 * easymesh_backhaul_ap_settings_len: Length of easymesh_backhaul_ap_settings in octets
++	 */
++	size_t easymesh_backhaul_ap_settings_len;
+ };
+ 
+ struct wps_registrar *
+--- a/src/wps/wps_attr_parse.c
++++ b/src/wps/wps_attr_parse.c
+@@ -67,6 +67,16 @@ static int wps_set_vendor_ext_wfa_subele
+ 		}
+ 		attr->registrar_configuration_methods = pos;
+ 		break;
++	case WFA_ELEM_EASYMESH_EXTENSION:
++		if (len != 1) {
++			wpa_printf(MSG_DEBUG, "WPS: Invalid EASYMESH Extension length "
++					"%u", len);
++			return -1;
++		}
++		attr->easymesh_ext = *pos;
++		wpa_printf(MSG_DEBUG, "WPS: EASYMESH Extension "
++				"%x",  attr->easymesh_ext);
++		break;
+ 	default:
+ 		wpa_printf(MSG_MSGDUMP, "WPS: Skipped unknown WFA Vendor "
+ 			   "Extension subelement %u", id);
+--- a/src/wps/wps_attr_parse.h
++++ b/src/wps/wps_attr_parse.h
+@@ -97,6 +97,7 @@ struct wps_parse_attr {
+ 	const u8 *cred[MAX_CRED_COUNT];
+ 	const u8 *req_dev_type[MAX_REQ_DEV_TYPE_COUNT];
+ 	const u8 *vendor_ext[MAX_WPS_PARSE_VENDOR_EXT];
++	u8 easymesh_ext;
+ };
+ 
+ int wps_parse_msg(const struct wpabuf *msg, struct wps_parse_attr *attr);
+--- a/src/wps/wps_defs.h
++++ b/src/wps/wps_defs.h
+@@ -152,9 +152,16 @@ enum {
+ 	WFA_ELEM_NETWORK_KEY_SHAREABLE = 0x02,
+ 	WFA_ELEM_REQUEST_TO_ENROLL = 0x03,
+ 	WFA_ELEM_SETTINGS_DELAY_TIME = 0x04,
+-	WFA_ELEM_REGISTRAR_CONFIGURATION_METHODS = 0x05
++	WFA_ELEM_REGISTRAR_CONFIGURATION_METHODS = 0x05,
++	WFA_ELEM_EASYMESH_EXTENSION = 0x06
+ };
+ 
++/*  Multi-AP extension subelement value */
++#define EASYMESH_TEAR_DOWN		0x10
++#define EASYMESH_FRONTHAUL_BSS	0x20
++#define EASYMESH_BACKHAUL_BSS	0x40
++#define EASYMESH_BACKHAUL_STA	0x80
++
+ /* Device Password ID */
+ enum wps_dev_password_id {
+ 	DEV_PW_DEFAULT = 0x0000,
+--- a/src/wps/wps_dev_attr.c
++++ b/src/wps/wps_dev_attr.c
+@@ -389,6 +389,11 @@ int wps_process_os_version(struct wps_de
+ 	return 0;
+ }
+ 
++void wps_process_vendor_ext_m1(struct wps_device_data *dev, const u8 ext)
++{
++	dev->easymesh_ext = ext;
++	wpa_printf(MSG_DEBUG, "WPS: EASYMESH extension value %02x", dev->easymesh_ext);
++}
+ 
+ int wps_process_rf_bands(struct wps_device_data *dev, const u8 *bands)
+ {
+--- a/src/wps/wps_dev_attr.h
++++ b/src/wps/wps_dev_attr.h
+@@ -29,6 +29,7 @@ int wps_build_dev_name(struct wps_device
+ int wps_process_device_attrs(struct wps_device_data *dev,
+ 			     struct wps_parse_attr *attr);
+ int wps_process_os_version(struct wps_device_data *dev, const u8 *ver);
++void wps_process_vendor_ext_m1(struct wps_device_data *dev, const u8 ext);
+ int wps_process_rf_bands(struct wps_device_data *dev, const u8 *bands);
+ void wps_device_data_free(struct wps_device_data *dev);
+ int wps_build_vendor_ext(struct wps_device_data *dev, struct wpabuf *msg);
+--- a/src/wps/wps_registrar.c
++++ b/src/wps/wps_registrar.c
+@@ -188,6 +188,7 @@ struct wps_registrar {
+ #ifdef WPS_WORKAROUNDS
+ 	struct os_reltime pbc_ignore_start;
+ #endif /* WPS_WORKAROUNDS */
++	int wps_cred_processing_easymesh;
+ };
+ 
+ 
+@@ -666,6 +667,7 @@ wps_registrar_init(struct wps_context *w
+ 	reg->static_wep_only = cfg->static_wep_only;
+ 	reg->dualband = cfg->dualband;
+ 	reg->force_per_enrollee_psk = cfg->force_per_enrollee_psk;
++	reg->wps_cred_processing_easymesh = cfg->wps_cred_processing_easymesh;
+ 
+ 	if (wps_set_ie(reg)) {
+ 		wps_registrar_deinit(reg);
+@@ -1588,6 +1590,15 @@ int wps_build_credential_wrap(struct wpa
+ 	return 0;
+ }
+ 
++static int wps_build_easymesh_backhual_ap_settings(struct wps_data *wps, struct wpabuf *msg)
++{
++	wpabuf_put_data(msg, wps->wps->easymesh_backhaul_ap_settings,
++			wps->wps->easymesh_backhaul_ap_settings_len);
++	wpa_printf(MSG_DEBUG, "WPS: EASYMESH mesh backhaul BSS config len %lu=%lu\n",
++		   wpabuf_len(msg),
++		   wps->wps->easymesh_backhaul_ap_settings_len);
++	return 0;
++}
+ 
+ int wps_build_cred(struct wps_data *wps, struct wpabuf *msg)
+ {
+@@ -1596,6 +1607,11 @@ int wps_build_cred(struct wps_data *wps,
+ 	if (wps->wps->registrar->skip_cred_build)
+ 		goto skip_cred_build;
+ 
++	if (wps->wps->registrar->wps_cred_processing_easymesh &&
++	    wps->peer_dev.easymesh_ext == EASYMESH_BACKHAUL_STA &&
++	    wps->wps->easymesh_backhaul_ap_settings)
++		return wps_build_easymesh_backhual_ap_settings(wps, msg);
++
+ 	wpa_printf(MSG_DEBUG, "WPS:  * Credential");
+ 	if (wps->use_cred) {
+ 		os_memcpy(&wps->cred, wps->use_cred, sizeof(wps->cred));
+@@ -2705,6 +2721,7 @@ static enum wps_process_res wps_process_
+ 		wps->use_psk_key = 1;
+ 	}
+ #endif /* WPS_WORKAROUNDS */
++	wps_process_vendor_ext_m1(&wps->peer_dev, attr->easymesh_ext);
+ 
+ 	wps->state = SEND_M2;
+ 	return WPS_CONTINUE;

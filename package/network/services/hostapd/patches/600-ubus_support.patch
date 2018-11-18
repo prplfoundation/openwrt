@@ -1,6 +1,6 @@
 --- a/hostapd/Makefile
 +++ b/hostapd/Makefile
-@@ -165,6 +165,11 @@ OBJS += ../src/common/hw_features_common
+@@ -169,6 +169,11 @@ OBJS += ../src/common/hw_features_common
  
  OBJS += ../src/eapol_auth/eapol_auth_sm.o
  
@@ -92,7 +92,7 @@
  		   __func__, driver, drv_priv);
 --- a/src/ap/ieee802_11.c
 +++ b/src/ap/ieee802_11.c
-@@ -1714,12 +1714,13 @@ ieee802_11_set_radius_info(struct hostap
+@@ -1742,12 +1742,13 @@ ieee802_11_set_radius_info(struct hostap
  
  
  static void handle_auth(struct hostapd_data *hapd,
@@ -108,7 +108,7 @@
  	u16 fc;
  	const u8 *challenge = NULL;
  	u32 session_timeout, acct_interim_interval;
-@@ -1730,6 +1731,11 @@ static void handle_auth(struct hostapd_d
+@@ -1758,6 +1759,11 @@ static void handle_auth(struct hostapd_d
  	char *identity = NULL;
  	char *radius_cui = NULL;
  	u16 seq_ctrl;
@@ -120,7 +120,7 @@
  
  	if (len < IEEE80211_HDRLEN + sizeof(mgmt->u.auth)) {
  		wpa_printf(MSG_INFO, "handle_auth - too short payload (len=%lu)",
-@@ -1890,6 +1896,13 @@ static void handle_auth(struct hostapd_d
+@@ -1918,6 +1924,13 @@ static void handle_auth(struct hostapd_d
  		resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
  		goto fail;
  	}
@@ -134,7 +134,7 @@
  	if (res == HOSTAPD_ACL_PENDING)
  		return;
  
-@@ -3169,12 +3182,12 @@ void fils_hlp_timeout(void *eloop_ctx, v
+@@ -3224,12 +3237,12 @@ void fils_hlp_timeout(void *eloop_ctx, v
  
  static void handle_assoc(struct hostapd_data *hapd,
  			 const struct ieee80211_mgmt *mgmt, size_t len,
@@ -149,7 +149,7 @@
  	struct sta_info *sta;
  	u8 *tmp = NULL;
  	struct hostapd_sta_wpa_psk_short *psk = NULL;
-@@ -3183,6 +3196,11 @@ static void handle_assoc(struct hostapd_
+@@ -3238,6 +3251,11 @@ static void handle_assoc(struct hostapd_
  #ifdef CONFIG_FILS
  	int delay_assoc = 0;
  #endif /* CONFIG_FILS */
@@ -161,7 +161,7 @@
  
  	if (len < IEEE80211_HDRLEN + (reassoc ? sizeof(mgmt->u.reassoc_req) :
  				      sizeof(mgmt->u.assoc_req))) {
-@@ -3354,6 +3372,14 @@ static void handle_assoc(struct hostapd_
+@@ -3409,6 +3427,14 @@ static void handle_assoc(struct hostapd_
  	}
  #endif /* CONFIG_MBO */
  
@@ -176,7 +176,7 @@
  	/*
  	 * sta->capability is used in check_assoc_ies() for RRM enabled
  	 * capability element.
-@@ -3567,6 +3593,7 @@ static void handle_disassoc(struct hosta
+@@ -3622,6 +3648,7 @@ static void handle_disassoc(struct hosta
  	wpa_printf(MSG_DEBUG, "disassocation: STA=" MACSTR " reason_code=%d",
  		   MAC2STR(mgmt->sa),
  		   le_to_host16(mgmt->u.disassoc.reason_code));
@@ -184,7 +184,7 @@
  
  	sta = ap_get_sta(hapd, mgmt->sa);
  	if (sta == NULL) {
-@@ -3632,6 +3659,8 @@ static void handle_deauth(struct hostapd
+@@ -3687,6 +3714,8 @@ static void handle_deauth(struct hostapd
  		" reason_code=%d",
  		MAC2STR(mgmt->sa), le_to_host16(mgmt->u.deauth.reason_code));
  
@@ -193,7 +193,7 @@
  	sta = ap_get_sta(hapd, mgmt->sa);
  	if (sta == NULL) {
  		wpa_msg(hapd->msg_ctx, MSG_DEBUG, "Station " MACSTR " trying "
-@@ -3951,7 +3980,7 @@ int ieee802_11_mgmt(struct hostapd_data
+@@ -4006,7 +4035,7 @@ int ieee802_11_mgmt(struct hostapd_data
  
  
  	if (stype == WLAN_FC_STYPE_PROBE_REQ) {
@@ -202,7 +202,7 @@
  		return 1;
  	}
  
-@@ -3971,17 +4000,17 @@ int ieee802_11_mgmt(struct hostapd_data
+@@ -4026,17 +4055,17 @@ int ieee802_11_mgmt(struct hostapd_data
  	switch (stype) {
  	case WLAN_FC_STYPE_AUTH:
  		wpa_printf(MSG_DEBUG, "mgmt::auth");

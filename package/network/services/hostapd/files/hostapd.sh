@@ -212,9 +212,12 @@ hostapd_common_add_bss_config() {
 
 	config_add_string wpa_psk_file
 
-	config_add_boolean wps_pushbutton wps_label ext_registrar wps_pbc_in_m1
+	config_add_int multi_ap
+
+	config_add_boolean wps_cred_processing_easymesh wps_pushbutton wps_label ext_registrar wps_pbc_in_m1
 	config_add_int wps_ap_setup_locked wps_independent
 	config_add_string wps_device_type wps_device_name wps_manufacturer wps_pin
+	config_add_string easymesh_backhaul_ap_settings
 
 	config_add_boolean ieee80211v wnm_sleep_mode bss_transition
 	config_add_int time_advertisement
@@ -256,12 +259,14 @@ hostapd_set_bss_options() {
 		wep_rekey wpa_group_rekey wpa_pair_rekey wpa_master_rekey \
 		wpa_disable_eapol_key_retries tdls_prohibit \
 		maxassoc max_inactivity disassoc_low_ack isolate auth_cache \
+		wps_cred_processing_easymesh easymesh_backhaul_ap_settings \
 		wps_pushbutton wps_label ext_registrar wps_pbc_in_m1 wps_ap_setup_locked \
 		wps_independent wps_device_type wps_device_name wps_manufacturer wps_pin \
 		macfilter ssid utf8_ssid wmm uapsd hidden short_preamble rsn_preauth \
 		iapp_interface eapol_version dynamic_vlan ieee80211w nasid \
 		acct_server acct_secret acct_port acct_interval \
-		bss_load_update_period chan_util_avg_period sae_require_mfp
+		bss_load_update_period chan_util_avg_period sae_require_mfp \
+		multi_ap
 
 	set_default isolate 0
 	set_default maxassoc 0
@@ -278,7 +283,9 @@ hostapd_set_bss_options() {
 	set_default bss_load_update_period 60
 	set_default chan_util_avg_period 600
 	set_default utf8_ssid 1
-	
+	set_default wps_cred_processing_easymesh 0
+	set_default multi_ap 0
+
 	append bss_conf "ctrl_interface=/var/run/hostapd"
 	if [ "$isolate" -gt 0 ]; then
 		append bss_conf "ap_isolate=$isolate" "$N"
@@ -289,6 +296,12 @@ hostapd_set_bss_options() {
 	if [ "$max_inactivity" -gt 0 ]; then
 		append bss_conf "ap_max_inactivity=$max_inactivity" "$N"
 	fi
+	if [ "$wps_cred_processing_easymesh" -gt 0 ]; then
+		append bss_conf "wps_cred_processing_easymesh=$wps_cred_processing_easymesh" "$N"
+	fi
+	if [ -n "$easymesh_backhaul_ap_settings" ]; then
+		append bss_conf "easymesh_backhaul_ap_settings=$easymesh_backhaul_ap_settings" "$N"
+	fi
 
 	append bss_conf "bss_load_update_period=$bss_load_update_period" "$N"
 	append bss_conf "chan_util_avg_period=$chan_util_avg_period" "$N"
@@ -298,6 +311,7 @@ hostapd_set_bss_options() {
 	append bss_conf "ignore_broadcast_ssid=$hidden" "$N"
 	append bss_conf "uapsd_advertisement_enabled=$uapsd" "$N"
 	append bss_conf "utf8_ssid=$utf8_ssid" "$N"
+	append bss_conf "multi_ap=$multi_ap" "$N"
 
 	[ "$tdls_prohibit" -gt 0 ] && append bss_conf "tdls_prohibit=$tdls_prohibit" "$N"
 
@@ -716,9 +730,11 @@ wpa_supplicant_add_network() {
 	json_get_vars \
 		ssid bssid key \
 		basic_rate mcast_rate \
-		ieee80211w ieee80211r
+		ieee80211w ieee80211r \
+		multi_ap
 
 	set_default ieee80211r 0
+	set_default multi_ap 0
 
 	local key_mgmt='NONE'
 	local enc_str=
@@ -751,6 +767,8 @@ wpa_supplicant_add_network() {
 	}
 
 	[ "$_w_mode" = "adhoc" -o "$_w_mode" = "mesh" ] && append network_data "$_w_modestr" "$N$T"
+
+	[ "$multi_ap" = 1 -a "$_w_mode" = "sta" ] && append network_data "multi_ap=1" "$N$T"
 
 	case "$auth_type" in
 		none) ;;
@@ -868,6 +886,11 @@ wpa_supplicant_add_network() {
 		wpa_supplicant_add_rate mc_rate "$mcast_rate"
 		append network_data "mcast_rate=$mc_rate" "$N$T"
 	}
+
+	local easymesh_backhaul_sta
+	json_get_values easymesh_backhaul_sta easymesh_backhaul_sta
+	set_default easymesh_backhaul_sta 0
+	[ "$easymesh_backhaul_sta" -gt 0 ] && append network_data "easymesh_backhaul_sta=$easymesh_backhaul_sta" "$N$T"
 
 	cat >> "$_config" <<EOF
 network={

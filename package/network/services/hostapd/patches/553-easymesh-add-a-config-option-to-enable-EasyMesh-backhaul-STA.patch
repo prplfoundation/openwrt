@@ -1,0 +1,204 @@
+From patchwork Fri Nov 16 20:32:55 2018
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+Subject: easymesh: add a config option to enable EasyMesh backhaul STA
+X-Patchwork-Submitter: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+X-Patchwork-Id: 999135
+Message-Id: <20181116203246.22415-1-igor.mitsyanko.os@quantenna.com>
+To: "hostap@lists.infradead.org" <hostap@lists.infradead.org>
+Cc: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>,
+ Marianna Carrera <mcarrera@quantenna.com>,
+ "wouter@e2big.org" <wouter@e2big.org>, "arnout@mind.be" <arnout@mind.be>, 
+ "Davina \(Ying\) Lu" <ylu@quantenna.com>
+Date: Fri, 16 Nov 2018 20:32:55 +0000
+From: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+List-Id: <hostap.lists.infradead.org>
+
+From: Davina Lu <ylu@quantenna.com>
+
+This patch adds a configuration option to wpa_supplicant to toggle a
+behavior compliant with the requirements of Wi-Fi Alliance Multi-AP
+Specification v1.0 (WFA EasyMesh). These specs can be found at
+https://www.wi-fi.org/file/multi-ap-specification-v10.
+They mandate that a “backhaul STA" (bSTA) includes a Multi-AP IE (Vendor
+Specific, WFA OUI, OUI Type 0x1B) with bit 7 of the subelement value set
+to 1,
+into (re)Association Requests, as well as a Multi-AP Extension
+Subelement with bit 7 of the subelement value set to 1, into WSC M1
+message.
+
+Therefore we introduce a new configuration options
+(easymesh_backhaul_sta) that toggles this behavior.
+
+Configuring these options will be done by a “MultiAP Agent”, an
+open-source implementation of such agent is work in progress at
+https://github.com/prplfoundation/prplMesh.
+
+Signed-off-by: Davina Lu <ylu@quantenna.com>
+Signed-off-by: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+reviewed-by: Marianna Carrera <mcarrera@quantenna.com>
+---
+ src/wps/wps.h                      |  1 +
+ src/wps/wps_dev_attr.c             | 26 ++++++++++++++++++++++++++
+ src/wps/wps_dev_attr.h             |  1 +
+ src/wps/wps_enrollee.c             |  3 ++-
+ wpa_supplicant/config.c            |  1 +
+ wpa_supplicant/config.h            |  2 ++
+ wpa_supplicant/config_file.c       |  3 +++
+ wpa_supplicant/wpa_supplicant.conf |  5 +++++
+ wpa_supplicant/wps_supplicant.c    |  8 ++++++++
+ 9 files changed, 49 insertions(+), 1 deletion(-)
+
+--- a/src/wps/wps.h
++++ b/src/wps/wps.h
+@@ -96,6 +96,7 @@ struct wps_device_data {
+ 	u32 os_version;
+ 	u8 rf_bands;
+ 	u16 config_methods;
++	u32 easymesh_backhaul_sta_en;
+ 	struct wpabuf *vendor_ext_m1;
+ 	struct wpabuf *vendor_ext[MAX_WPS_VENDOR_EXTENSIONS];
+ 
+--- a/src/wps/wps_dev_attr.c
++++ b/src/wps/wps_dev_attr.c
+@@ -12,6 +12,7 @@
+ #include "wps_i.h"
+ #include "wps_dev_attr.h"
+ 
++static u8 easymesh_backhaul_sta_vendor_ext[] = { 0x06, 0x01, 0x80 };
+ 
+ int wps_build_manufacturer(struct wps_device_data *dev, struct wpabuf *msg)
+ {
+@@ -215,6 +216,31 @@ int wps_build_vendor_ext_m1(struct wps_d
+ 	return 0;
+ }
+ 
++int wps_build_vendor_ext_m1_wfa(struct wps_device_data *dev, struct wpabuf *msg)
++{
++	struct wpabuf *easymesh_backhaul_sta;
++
++	if (dev->easymesh_backhaul_sta_en) {
++		easymesh_backhaul_sta = 
++			wpabuf_alloc(sizeof(easymesh_backhaul_sta_vendor_ext));
++		if (!easymesh_backhaul_sta)
++			return -1;
++
++		wpabuf_put_data(easymesh_backhaul_sta,
++			       	easymesh_backhaul_sta_vendor_ext,
++				sizeof(easymesh_backhaul_sta_vendor_ext));
++
++		wpa_hexdump(MSG_DEBUG, "WPS:  * Vendor Extension M1 WFA",
++			    wpabuf_head_u8(easymesh_backhaul_sta),
++			    wpabuf_len(easymesh_backhaul_sta));
++		wpabuf_put_be16(msg, ATTR_VENDOR_EXT);
++		wpabuf_put_be16(msg, wpabuf_len(easymesh_backhaul_sta) + 3);
++		wpabuf_put_be24(msg, WPS_VENDOR_ID_WFA);
++		wpabuf_put_buf(msg, easymesh_backhaul_sta);
++	}
++
++	return 0;
++}
+ 
+ int wps_build_rf_bands(struct wps_device_data *dev, struct wpabuf *msg,
+ 		       u8 rf_band)
+--- a/src/wps/wps_dev_attr.h
++++ b/src/wps/wps_dev_attr.h
+@@ -19,6 +19,7 @@ int wps_build_dev_name(struct wps_device
+ int wps_build_device_attrs(struct wps_device_data *dev, struct wpabuf *msg);
+ int wps_build_os_version(struct wps_device_data *dev, struct wpabuf *msg);
+ int wps_build_vendor_ext_m1(struct wps_device_data *dev, struct wpabuf *msg);
++int wps_build_vendor_ext_m1_wfa(struct wps_device_data *dev, struct wpabuf *msg);
+ int wps_build_rf_bands(struct wps_device_data *dev, struct wpabuf *msg,
+ 		       u8 rf_band);
+ int wps_build_primary_dev_type(struct wps_device_data *dev,
+--- a/src/wps/wps_enrollee.c
++++ b/src/wps/wps_enrollee.c
+@@ -153,7 +153,8 @@ static struct wpabuf * wps_build_m1(stru
+ 	    wps_build_config_error(msg, WPS_CFG_NO_ERROR) ||
+ 	    wps_build_os_version(&wps->wps->dev, msg) ||
+ 	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
+-	    wps_build_vendor_ext_m1(&wps->wps->dev, msg)) {
++	    wps_build_vendor_ext_m1(&wps->wps->dev, msg) ||
++	    wps_build_vendor_ext_m1_wfa(&wps->wps->dev, msg)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -4736,6 +4736,7 @@ static const struct global_parse_data gl
+ 	{ STR(config_methods), CFG_CHANGED_CONFIG_METHODS },
+ 	{ INT_RANGE(wps_cred_processing, 0, 2), 0 },
+ 	{ FUNC(wps_vendor_ext_m1), CFG_CHANGED_VENDOR_EXTENSION },
++	{ INT_RANGE(easymesh_backhaul_sta, 0, 1), CFG_CHANGED_EASYMESH_BACKHAUL_STA },
+ #endif /* CONFIG_WPS */
+ #ifdef CONFIG_P2P
+ 	{ FUNC(sec_device_type), CFG_CHANGED_SEC_DEVICE_TYPE },
+--- a/wpa_supplicant/config.h
++++ b/wpa_supplicant/config.h
+@@ -375,6 +375,7 @@ struct wpa_cred {
+ #define CFG_CHANGED_P2P_PASSPHRASE_LEN BIT(16)
+ #define CFG_CHANGED_SCHED_SCAN_PLANS BIT(17)
+ #define CFG_CHANGED_WOWLAN_TRIGGERS BIT(18)
++#define CFG_CHANGED_EASYMESH_BACKHAUL_STA BIT(19)
+ 
+ /**
+  * struct wpa_config - wpa_supplicant configuration data
+@@ -769,6 +770,7 @@ struct wpa_config {
+ 	int p2p_optimize_listen_chan;
+ 
+ 	struct wpabuf *wps_vendor_ext_m1;
++	int easymesh_backhaul_sta;
+ 
+ #define MAX_WPS_VENDOR_EXT 10
+ 	/**
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -1185,6 +1185,9 @@ static void wpa_config_write_global(FILE
+ 			fprintf(f, "\n");
+ 		}
+ 	}
++	if (config->easymesh_backhaul_sta)
++		fprintf(f, "easymesh_backhaul_sta=%d\n", config->easymesh_backhaul_sta);
++
+ #endif /* CONFIG_WPS */
+ #ifdef CONFIG_P2P
+ 	{
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -289,6 +289,11 @@ fast_reauth=1
+ # The vendor attribute contents to be added in M1 (hex string)
+ #wps_vendor_ext_m1=000137100100020001
+ 
++# EasyMesh STA config
++# When set to 1, the EasyMesh vendor extension is added to WPS M1 and the
++# EasyMesh IE is sent to the driver for inclusion in association request frames.
++#easymesh_backhaul_sta=1
++
+ # NFC password token for WPS
+ # These parameters can be used to configure a fixed NFC password token for the
+ # station. This can be generated, e.g., with nfc_pw_token. When these
+--- a/wpa_supplicant/wps_supplicant.c
++++ b/wpa_supplicant/wps_supplicant.c
+@@ -1527,6 +1527,11 @@ static void wpas_wps_set_vendor_ext_m1(s
+ 	}
+ }
+ 
++void wpas_wps_set_easymesh_backhaul_sta(struct wpa_supplicant *wpa_s,
++					struct wps_context *wps)
++{
++	wps->dev.easymesh_backhaul_sta_en = wpa_s->conf->easymesh_backhaul_sta;
++}
+ 
+ int wpas_wps_init(struct wpa_supplicant *wpa_s)
+ {
+@@ -2205,6 +2210,9 @@ void wpas_wps_update_config(struct wpa_s
+ 	if (wpa_s->conf->changed_parameters & CFG_CHANGED_VENDOR_EXTENSION)
+ 		wpas_wps_set_vendor_ext_m1(wpa_s, wps);
+ 
++	if (wpa_s->conf->changed_parameters & CFG_CHANGED_EASYMESH_BACKHAUL_STA)
++		wpas_wps_set_easymesh_backhaul_sta(wpa_s, wps);
++
+ 	if (wpa_s->conf->changed_parameters & CFG_CHANGED_OS_VERSION)
+ 		wps->dev.os_version = WPA_GET_BE32(wpa_s->conf->os_version);
+ 

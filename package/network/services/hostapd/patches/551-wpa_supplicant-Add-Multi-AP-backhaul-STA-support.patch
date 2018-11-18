@@ -1,0 +1,362 @@
+From 34c2a4779e638ced77da918cb26bb60eed534ae7 Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+Date: Mon, 19 Nov 2018 00:18:59 +0200
+Subject: [PATCH] wpa_supplicant: Add Multi-AP backhaul STA support
+
+Advertise vendor specific Multi-AP IE in (Re)Association request
+and process Multi-AP IE from (Re)Association response frames if
+user enables Multi-AP fuctionality.
+
+This patch introducing new configuration parameter 'multi_ap'
+to enable/disable Multi-AP funtionality from user.
+
+Signed-off-by: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+Signed-off-by: Jouni Malinen <jouni@codeaurora.org>
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+---
+v2 (Arnout):
+- Do not change bridge, only set 4addr.
+- Rename set_multi_ap driver interface to set_4addr.
+- Rename config option multi_ap_enabled to multi_ap.
+- Improve documentation of config option.
+- Don't de-authenticate automatically when multi_ap option is changed
+  through ctrl_iface.
+- Actually validate multi_ap subelement in wpa_validate_multi_ap_ie()
+  and de-associate if it is not a bBSS.
+- Use add_multi_ap_ie() to build the IE instead of two new functions.
+
+---
+While working on this, I noticed that inside
+wpa_supplicant_event_associnfo(), data->assoc_info.resp_ies is
+potentially parsed over and over again, e.g. in wpa_tdls_assoc_resp_ies,
+wnm_process_assoc_resp, and now also in wpa_validate_multi_ap_ie.
+Perhaps it would pay off to do this only once, unconditionally, and pass
+the parsed elems to all these functions...
+---
+ src/drivers/driver.h               |  9 ++++++
+ src/drivers/driver_nl80211.c       | 28 +++++++++++++++++
+ wpa_supplicant/Makefile            |  4 +++
+ wpa_supplicant/config.c            |  3 ++
+ wpa_supplicant/config_ssid.h       |  9 +++++-
+ wpa_supplicant/defconfig           |  3 ++
+ wpa_supplicant/driver_i.h          |  9 ++++++
+ wpa_supplicant/events.c            | 49 ++++++++++++++++++++++++++++++
+ wpa_supplicant/sme.c               | 17 ++++++++++-
+ wpa_supplicant/wpa_supplicant.c    | 21 ++++++++++++-
+ wpa_supplicant/wpa_supplicant.conf |  9 ++++++
+ 11 files changed, 158 insertions(+), 3 deletions(-)
+
+diff --git a/src/drivers/driver.h b/src/drivers/driver.h
+index 3c1e8368c..9b742761f 100644
+--- a/src/drivers/driver.h
++++ b/src/drivers/driver.h
+@@ -4073,6 +4073,15 @@ struct wpa_driver_ops {
+ 	 */
+ 	int (*send_external_auth_status)(void *priv,
+ 					 struct external_auth *params);
++
++#ifdef CONFIG_MULTI_AP
++	/**
++	 * set_4addr - Enable/disable 4-address mode
++	 * @priv: Private driver interface data
++	 * @val: 0 for 4-addr disable, 1 for 4-addr enable
++	 */
++	int (*set_4addr)(void *priv, int val);
++#endif /* CONFIG_MULTI_AP */
+ };
+ 
+ /**
+diff --git a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
+index f0e5cec5b..2befd926b 100644
+--- a/src/drivers/driver_nl80211.c
++++ b/src/drivers/driver_nl80211.c
+@@ -10622,6 +10622,31 @@ fail:
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_MULTI_AP
++static int nl80211_set_4addr(void *priv, int val)
++{
++	struct i802_bss *bss = priv;
++	struct wpa_driver_nl80211_data *drv = bss->drv;
++	struct nl_msg *msg;
++	int ret = -ENOBUFS;
++
++	msg = nl80211_cmd_msg(drv->first_bss, 0, NL80211_CMD_SET_INTERFACE);
++	if (!msg || nla_put_u8(msg, NL80211_ATTR_4ADDR, val))
++		goto fail;
++
++	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
++	msg = NULL;
++	if (!ret) {
++		return 0;
++	}
++
++fail:
++	nlmsg_free(msg);
++	wpa_printf(MSG_ERROR, "nl80211: Failed to set Multi-AP");
++
++	return ret;
++}
++#endif /* CONFIG_MULTI_AP */
+ 
+ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
+ 	.name = "nl80211",
+@@ -10751,4 +10776,7 @@ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
+ 	.get_ext_capab = nl80211_get_ext_capab,
+ 	.update_connect_params = nl80211_update_connection_params,
+ 	.send_external_auth_status = nl80211_send_external_auth_status,
++#ifdef CONFIG_MULTI_AP
++	.set_4addr = nl80211_set_4addr,
++#endif /* CONFIG_MULTI_AP */
+ };
+diff --git a/wpa_supplicant/Makefile b/wpa_supplicant/Makefile
+index 77e704676..5e84f42f9 100644
+--- a/wpa_supplicant/Makefile
++++ b/wpa_supplicant/Makefile
+@@ -101,6 +101,10 @@ CONFIG_NO_RANDOM_POOL=
+ CONFIG_OPENSSL_CMAC=y
+ endif
+ 
++ifdef CONFIG_MULTI_AP
++CFLAGS += -DCONFIG_MULTI_AP
++endif
++
+ OBJS = config.o
+ OBJS += notify.o
+ OBJS += bss.o
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index 13adf776f..ecc00802a 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -2400,6 +2400,9 @@ static const struct parse_data ssid_fields[] = {
+ #endif /* CONFIG_DPP */
+ 	{ INT_RANGE(owe_group, 0, 65535) },
+ 	{ INT_RANGE(owe_only, 0, 1) },
++#ifdef CONFIG_MULTI_AP
++	{ INT_RANGE(multi_ap, 0, 1) },
++#endif
+ };
+ 
+ #undef OFFSET
+diff --git a/wpa_supplicant/config_ssid.h b/wpa_supplicant/config_ssid.h
+index b0343d49b..9ee980b0a 100644
+--- a/wpa_supplicant/config_ssid.h
++++ b/wpa_supplicant/config_ssid.h
+@@ -940,6 +940,13 @@ struct wpa_ssid {
+ 	 * 1 = disable transition mode (allow connection only with OWE)
+ 	 */
+ 	int owe_only;
+-};
+ 
++#ifdef CONFIG_MULTI_AP
++	/** multi_ap - Enable/disable Multi-AP backhaul STA functionality
++	 * 0 = disable Multi-AP
++	 * 1 = enable Multi-AP
++	 */
++	int multi_ap;
++#endif /* CONFIG_MULTI_AP */
++};
+ #endif /* CONFIG_SSID_H */
+diff --git a/wpa_supplicant/defconfig b/wpa_supplicant/defconfig
+index 08f585779..3c3081c95 100644
+--- a/wpa_supplicant/defconfig
++++ b/wpa_supplicant/defconfig
+@@ -593,3 +593,6 @@ CONFIG_BACKEND=file
+ # Opportunistic Wireless Encryption (OWE)
+ # Experimental implementation of draft-harkins-owe-07.txt
+ #CONFIG_OWE=y
++
++#Multi-AP protocol support
++#CONFIG_MULTI_AP=y
+diff --git a/wpa_supplicant/driver_i.h b/wpa_supplicant/driver_i.h
+index 078de23f7..7686e26ba 100644
+--- a/wpa_supplicant/driver_i.h
++++ b/wpa_supplicant/driver_i.h
+@@ -30,6 +30,15 @@ static inline void wpa_drv_deinit(struct wpa_supplicant *wpa_s)
+ 		wpa_s->driver->deinit(wpa_s->drv_priv);
+ }
+ 
++#ifdef CONFIG_MULTI_AP
++static inline int wpa_drv_set_4addr(struct wpa_supplicant *wpa_s, int val)
++{
++	if (wpa_s->driver->set_4addr)
++		return wpa_s->driver->set_4addr(wpa_s->drv_priv, val);
++	return -1;
++}
++#endif /* CONFIG_MULTI_AP */
++
+ static inline int wpa_drv_set_param(struct wpa_supplicant *wpa_s,
+ 				    const char *param)
+ {
+diff --git a/wpa_supplicant/events.c b/wpa_supplicant/events.c
+index c28ead0e8..7d6c564c0 100644
+--- a/wpa_supplicant/events.c
++++ b/wpa_supplicant/events.c
+@@ -2228,6 +2228,37 @@ static void interworking_process_assoc_resp(struct wpa_supplicant *wpa_s,
+ 
+ #endif /* CONFIG_INTERWORKING */
+ 
++#ifdef CONFIG_MULTI_AP
++static int wpa_validate_multi_ap_ie(struct wpa_supplicant *wpa_s,
++			       const u8 *ies, size_t ies_len)
++{
++	struct ieee802_11_elems elems;
++	const u8 *multi_ap_subelem;
++
++	if (ies == NULL)
++		return -1;
++
++	if (ieee802_11_parse_elems(ies, ies_len, &elems, 1) == ParseFailed)
++		return -1;
++
++	if (!elems.multi_ap) {
++		wpa_printf(MSG_INFO, " AP doesn't support Multi-AP");
++		return -1;
++	}
++	multi_ap_subelem = get_ie(elems.multi_ap + 4, elems.multi_ap_len - 4,
++				  MULTI_AP_SUB_ELEM_TYPE);
++	if (!multi_ap_subelem ||
++	    multi_ap_subelem[1] != 1)
++		return -1;
++
++	if (multi_ap_subelem[2] & MULTI_AP_BACKHAUL_BSS)
++		return 0;
++	else {
++		wpa_printf(MSG_INFO, " AP supports Multi-AP but is not backhaul AP");
++		return -1;
++	}
++}
++#endif /* CONFIG_MULTI_AP */
+ 
+ #ifdef CONFIG_FST
+ static int wpas_fst_update_mbie(struct wpa_supplicant *wpa_s,
+@@ -2372,6 +2403,24 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
+ 	}
+ #endif /* CONFIG_OWE */
+ 
++#ifdef CONFIG_MULTI_AP
++	if (wpa_s->current_ssid->multi_ap) {
++		if (wpa_validate_multi_ap_ie(wpa_s, data->assoc_info.resp_ies,
++					     data->assoc_info.resp_ies_len)) {
++			wpa_supplicant_deauthenticate(wpa_s,
++						      WLAN_REASON_INVALID_IE);
++			return -1;
++		}
++	}
++	if (wpa_drv_set_4addr(wpa_s,
++			      wpa_s->current_ssid->multi_ap)) {
++		wpa_printf(MSG_ERROR, "failed to set 4-address mode\n");
++		wpa_supplicant_deauthenticate(wpa_s,
++					      WLAN_REASON_DEAUTH_LEAVING);
++		return -1;
++	}
++#endif /* CONFIG_MULTI_AP */
++
+ #ifdef CONFIG_IEEE80211R
+ #ifdef CONFIG_SME
+ 	if (wpa_s->sme.auth_alg == WPA_AUTH_ALG_FT) {
+diff --git a/wpa_supplicant/sme.c b/wpa_supplicant/sme.c
+index d57195f15..f0cce309f 100644
+--- a/wpa_supplicant/sme.c
++++ b/wpa_supplicant/sme.c
+@@ -39,7 +39,6 @@ static void sme_obss_scan_timeout(void *eloop_ctx, void *timeout_ctx);
+ static void sme_stop_sa_query(struct wpa_supplicant *wpa_s);
+ #endif /* CONFIG_IEEE80211W */
+ 
+-
+ #ifdef CONFIG_SAE
+ 
+ static int index_within_array(const int *array, int idx)
+@@ -1462,6 +1461,22 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
+ 	}
+ #endif /* CONFIG_OWE */
+ 
++#ifdef CONFIG_MULTI_AP
++	if (wpa_s->conf->ssid->multi_ap) {
++		size_t multi_ap_ie_len =
++			add_multi_ap_ie(wpa_s->sme.assoc_req_ie
++						+ wpa_s->sme.assoc_req_ie_len,
++					sizeof(wpa_s->sme.assoc_req_ie)
++						- wpa_s->sme.assoc_req_ie_len,
++					MULTI_AP_BACKHAUL_STA);
++		if (multi_ap_ie_len == 0) {
++			wpa_printf(MSG_ERROR, "Multi-AP: Failed to build Multi-AP IE");
++			return;
++		}
++		wpa_s->sme.assoc_req_ie_len += multi_ap_ie_len;
++	}
++#endif /* CONFIG_MULTI_AP */
++
+ 	params.bssid = bssid;
+ 	params.ssid = wpa_s->sme.ssid;
+ 	params.ssid_len = wpa_s->sme.ssid_len;
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+index 1941fd310..32d3ce79f 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -331,7 +331,6 @@ void wpa_supplicant_cancel_auth_timeout(struct wpa_supplicant *wpa_s)
+ 	wpa_blacklist_del(wpa_s, wpa_s->bssid);
+ }
+ 
+-
+ /**
+  * wpa_supplicant_initiate_eapol - Configure EAPOL state machine
+  * @wpa_s: Pointer to wpa_supplicant data
+@@ -2837,6 +2836,21 @@ static u8 * wpas_populate_assoc_ies(
+ 	}
+ #endif /* CONFIG_IEEE80211R */
+ 
++#ifdef CONFIG_MULTI_AP
++	if (ssid->multi_ap) {
++		size_t multi_ap_ie_len =
++			add_multi_ap_ie(wpa_ie + wpa_ie_len,
++					max_wpa_ie_len - wpa_ie_len,
++					MULTI_AP_BACKHAUL_STA);
++		if (multi_ap_ie_len == 0) {
++			wpa_printf(MSG_ERROR, "Multi-AP: Failed to build Multi-AP IE");
++			os_free(wpa_ie);
++			return NULL;
++		}
++		wpa_ie_len += multi_ap_ie_len;
++	}
++#endif /* CONFIG_MULTI_AP */
++
+ 	params->wpa_ie = wpa_ie;
+ 	params->wpa_ie_len = wpa_ie_len;
+ 	params->auth_alg = algs;
+@@ -3333,6 +3347,11 @@ void wpa_supplicant_deauthenticate(struct wpa_supplicant *wpa_s,
+ 	}
+ #endif /* CONFIG_MESH */
+ 
++#ifdef CONFIG_MULTI_AP
++	if (wpa_s->current_ssid && wpa_s->current_ssid->multi_ap)
++		wpa_drv_set_4addr(wpa_s, 0);
++#endif /* CONFIG_MULTI_AP */
++
+ 	if (addr) {
+ 		wpa_drv_deauthenticate(wpa_s, addr, reason_code);
+ 		os_memset(&event, 0, sizeof(event));
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index 0d50001d8..d8d089d00 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -1394,6 +1394,15 @@ fast_reauth=1
+ #  2: MCS 0-9
+ #  3: not supported
+ 
++# Multi-AP backhaul STA funtionality. This option is only available when the
++# build configuration option CONFIG_MULTI_AP is set while compiling
++# wpa_supplicant.
++# If this option is set to 1, the BSS is considered as a Multi-AP backhaul STA.
++# If the AP is not a Multi-AP backhaul AP, association will fail. If it is,
++# 4-address mode will be used for the link and the netif can be added to a
++# bridge to allow forwarding frames over this backhaul link.
++#multi_ap=0
++
+ ##### Fast Session Transfer (FST) support #####################################
+ #
+ # The options in this section are only available when the build configuration
+-- 
+2.19.1
+
