@@ -1,0 +1,389 @@
+From 64e602ba0f5dc0290455c63f4b78c9fd4ab2a531 Mon Sep 17 00:00:00 2001
+From: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+Date: Mon, 3 Dec 2018 00:36:45 +0200
+Subject: [PATCH] wpa_supplicant: Add Multi-AP protocol support to supplicant
+
+Advertise vendor specific Multi-AP IE in (Re)Association request
+and process Multi-AP IE from (Re)Association response frames if
+user enable Multi-AP fuctionality.
+
+This patch introducing new configuration parameter 'multi_ap_enabled'
+to enable/disable Multi-AP funtionality from user.
+
+Signed-off-by: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+Signed-off-by: Jouni Malinen <jouni@codeaurora.org>
+---
+ src/drivers/driver.h               | 11 +++++++
+ src/drivers/driver_nl80211.c       | 45 +++++++++++++++++++++++++
+ wpa_supplicant/Makefile            |  4 +++
+ wpa_supplicant/config.c            |  3 ++
+ wpa_supplicant/config_ssid.h       |  8 +++++
+ wpa_supplicant/defconfig           |  3 ++
+ wpa_supplicant/driver_i.h          | 10 ++++++
+ wpa_supplicant/events.c            | 53 ++++++++++++++++++++++++++++++
+ wpa_supplicant/sme.c               | 14 +++++++-
+ wpa_supplicant/wpa_supplicant.c    | 29 ++++++++++++++++
+ wpa_supplicant/wpa_supplicant.conf |  4 +++
+ wpa_supplicant/wpa_supplicant_i.h  |  6 ++++
+ 12 files changed, 189 insertions(+), 1 deletion(-)
+
+diff --git a/src/drivers/driver.h b/src/drivers/driver.h
+index 3c1e8368c..2da1293eb 100644
+--- a/src/drivers/driver.h
++++ b/src/drivers/driver.h
+@@ -4073,6 +4073,17 @@ struct wpa_driver_ops {
+ 	 */
+ 	int (*send_external_auth_status)(void *priv,
+ 					 struct external_auth *params);
++
++#ifdef CONFIG_MULTI_AP
++	/**
++	 * set_4addr_mode - Set 4address mode
++	 * @priv: Private driver interface data
++	 * @val: 0 - disabale 4addr mode
++	 *	 1 - enable 4addr mode
++	 * @brige_ifname - Bridge interface name
++	 */
++	int (*set_4addr_mode)(void *priv, const char *dridge_ifname, int val);
++#endif /* CONFIG_MULTI_AP */
+ };
+ 
+ /**
+diff --git a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
+index f0e5cec5b..b0bc7fefb 100644
+--- a/src/drivers/driver_nl80211.c
++++ b/src/drivers/driver_nl80211.c
+@@ -10622,6 +10622,48 @@ fail:
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_MULTI_AP
++static int nl80211_set_4addr_mode(void *priv, const char *bridge_ifname,
++				  int val)
++{
++	struct i802_bss *bss = priv;
++	struct wpa_driver_nl80211_data *drv = bss->drv;
++	struct nl_msg *msg;
++	int ret = -ENOBUFS;
++
++	msg = nl80211_cmd_msg(drv->first_bss, 0, NL80211_CMD_SET_INTERFACE);
++	if (!msg || nla_put_u8(msg, NL80211_ATTR_4ADDR, val))
++		goto fail;
++
++	if (bridge_ifname[0] && bss->added_if_into_bridge && !val) {
++		if (linux_br_del_if(drv->global->ioctl_sock,
++				    bridge_ifname, bss->ifname)) {
++			wpa_printf(MSG_ERROR, "nl80211: Failed to remove the "
++					"interface %s to a bridge %s",
++					bss->ifname, bridge_ifname);
++			return -1;
++		}
++		bss->added_if_into_bridge = 0;
++	}
++
++	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
++	msg = NULL;
++	if (!ret) {
++		if (bridge_ifname[0] && val) {
++			if (i802_check_bridge(drv, bss,
++					      bridge_ifname, bss->ifname) < 0)
++				return -1;
++		}
++		return 0;
++	}
++
++fail:
++	nlmsg_free(msg);
++	wpa_printf(MSG_ERROR, "nl80211: Failed to enable/disable 4addr");
++
++	return ret;
++}
++#endif /* CONFIG_MULTI_AP */
+ 
+ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
+ 	.name = "nl80211",
+@@ -10751,4 +10793,7 @@ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
+ 	.get_ext_capab = nl80211_get_ext_capab,
+ 	.update_connect_params = nl80211_update_connection_params,
+ 	.send_external_auth_status = nl80211_send_external_auth_status,
++#ifdef CONFIG_MULTI_AP
++	.set_4addr_mode = nl80211_set_4addr_mode,
++#endif /* CONFIG_MULTI_AP */
+ };
+diff --git a/wpa_supplicant/Makefile b/wpa_supplicant/Makefile
+index 77e704676..5e84f42f9 100644
+--- a/wpa_supplicant/Makefile
++++ b/wpa_supplicant/Makefile
+@@ -101,6 +101,10 @@ CONFIG_NO_RANDOM_POOL=
+ CONFIG_OPENSSL_CMAC=y
+ endif
+ 
++ifdef CONFIG_MULTI_AP
++CFLAGS += -DCONFIG_MULTI_AP
++endif
++
+ OBJS = config.o
+ OBJS += notify.o
+ OBJS += bss.o
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index 13adf776f..858ea0690 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -2400,6 +2400,9 @@ static const struct parse_data ssid_fields[] = {
+ #endif /* CONFIG_DPP */
+ 	{ INT_RANGE(owe_group, 0, 65535) },
+ 	{ INT_RANGE(owe_only, 0, 1) },
++#ifdef CONFIG_MULTI_AP
++	{ INT_RANGE(multiap_backhaul_sta, 0, 1) },
++#endif
+ };
+ 
+ #undef OFFSET
+diff --git a/wpa_supplicant/config_ssid.h b/wpa_supplicant/config_ssid.h
+index b0343d49b..31055e6c5 100644
+--- a/wpa_supplicant/config_ssid.h
++++ b/wpa_supplicant/config_ssid.h
+@@ -940,6 +940,14 @@ struct wpa_ssid {
+ 	 * 1 = disable transition mode (allow connection only with OWE)
+ 	 */
+ 	int owe_only;
++
++#ifdef CONFIG_MULTI_AP
++	/*
++	 * 0 = normal station
++	 * 1 = backhaul station
++	 */
++	int multiap_backhaul_sta;
++#endif /* CONFIG_MULTI_AP */
+ };
+ 
+ #endif /* CONFIG_SSID_H */
+diff --git a/wpa_supplicant/defconfig b/wpa_supplicant/defconfig
+index 08f585779..3c3081c95 100644
+--- a/wpa_supplicant/defconfig
++++ b/wpa_supplicant/defconfig
+@@ -593,3 +593,6 @@ CONFIG_BACKEND=file
+ # Opportunistic Wireless Encryption (OWE)
+ # Experimental implementation of draft-harkins-owe-07.txt
+ #CONFIG_OWE=y
++
++#Multi-AP protocol support
++#CONFIG_MULTI_AP=y
+diff --git a/wpa_supplicant/driver_i.h b/wpa_supplicant/driver_i.h
+index 078de23f7..9c1a26d8b 100644
+--- a/wpa_supplicant/driver_i.h
++++ b/wpa_supplicant/driver_i.h
+@@ -30,6 +30,16 @@ static inline void wpa_drv_deinit(struct wpa_supplicant *wpa_s)
+ 		wpa_s->driver->deinit(wpa_s->drv_priv);
+ }
+ 
++#ifdef CONFIG_MULTI_AP
++static inline int wpa_drv_set_4addr_mode(struct wpa_supplicant *wpa_s, int val)
++{
++	if (wpa_s->driver->set_4addr_mode)
++		return wpa_s->driver->set_4addr_mode(wpa_s->drv_priv,
++						     wpa_s->bridge_ifname, val);
++	return -1;
++}
++#endif /* CONFIG_MULTI_AP */
++
+ static inline int wpa_drv_set_param(struct wpa_supplicant *wpa_s,
+ 				    const char *param)
+ {
+diff --git a/wpa_supplicant/events.c b/wpa_supplicant/events.c
+index c28ead0e8..4b6e28788 100644
+--- a/wpa_supplicant/events.c
++++ b/wpa_supplicant/events.c
+@@ -2228,6 +2228,55 @@ static void interworking_process_assoc_resp(struct wpa_supplicant *wpa_s,
+ 
+ #endif /* CONFIG_INTERWORKING */
+ 
++#ifdef CONFIG_MULTI_AP
++static void multi_ap_process_assoc_resp(struct wpa_supplicant *wpa_s,
++					const u8 *ies, size_t ies_len)
++{
++	struct ieee802_11_elems elems;
++	const u8 *map_sub_elem, *pos;
++	size_t len;
++
++	if (!wpa_s->current_ssid->multiap_backhaul_sta)
++		return;
++
++	if (ies == NULL)
++		return;
++
++	if (ieee802_11_parse_elems(ies, ies_len, &elems, 1) == ParseFailed)
++		return;
++
++	if (elems.multi_ap && (elems.multi_ap_len >= 7)) {
++		pos = elems.multi_ap + 4;
++		len = elems.multi_ap_len - 4;
++
++		map_sub_elem = get_ie(pos, len, MULTI_AP_SUB_ELEM_TYPE);
++		if (!map_sub_elem || map_sub_elem[1] < 1) {
++			wpa_printf(MSG_INFO, "invalid Multi-AP sub elem type\n");
++			goto fail;
++		}
++
++		if (!(map_sub_elem[2] & MULTI_AP_BACKHAUL_BSS)) {
++			wpa_printf(MSG_INFO, "AP doesn't support BACKHAUL BSS");
++			goto fail;
++		}
++
++		if (wpa_drv_set_4addr_mode(wpa_s, 1)) {
++			wpa_printf(MSG_ERROR, "failed to sed 4addr mode\n");
++			goto fail;
++		}
++		wpa_s->enabled_4addr_mode = 1;
++	} else {
++		wpa_printf(MSG_INFO, "AP doesn't support Multi-AP protocol");
++		goto fail;
++	}
++
++	return;
++
++fail:
++	wpa_supplicant_deauthenticate(wpa_s, WLAN_REASON_DEAUTH_LEAVING);
++	return;
++}
++#endif /* CONFIG_MULTI_AP */
+ 
+ #ifdef CONFIG_FST
+ static int wpas_fst_update_mbie(struct wpa_supplicant *wpa_s,
+@@ -2305,6 +2354,10 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
+ 		    get_ie(data->assoc_info.resp_ies,
+ 			   data->assoc_info.resp_ies_len, WLAN_EID_VHT_CAP))
+ 			wpa_s->ieee80211ac = 1;
++#ifdef CONFIG_MULTI_AP
++		multi_ap_process_assoc_resp(wpa_s, data->assoc_info.resp_ies,
++					    data->assoc_info.resp_ies_len);
++#endif /* CONFIG_MULTI_AP */
+ 	}
+ 	if (data->assoc_info.beacon_ies)
+ 		wpa_hexdump(MSG_DEBUG, "beacon_ies",
+diff --git a/wpa_supplicant/sme.c b/wpa_supplicant/sme.c
+index d57195f15..cdbdfc063 100644
+--- a/wpa_supplicant/sme.c
++++ b/wpa_supplicant/sme.c
+@@ -39,7 +39,6 @@ static void sme_obss_scan_timeout(void *eloop_ctx, void *timeout_ctx);
+ static void sme_stop_sa_query(struct wpa_supplicant *wpa_s);
+ #endif /* CONFIG_IEEE80211W */
+ 
+-
+ #ifdef CONFIG_SAE
+ 
+ static int index_within_array(const int *array, int idx)
+@@ -1462,6 +1461,19 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
+ 	}
+ #endif /* CONFIG_OWE */
+ 
++#ifdef CONFIG_MULTI_AP
++	if (wpa_s->conf->ssid->multiap_backhaul_sta) {
++		if (wpa_s->sme.assoc_req_ie_len + 9 >
++		    sizeof(wpa_s->sme.assoc_req_ie)) {
++			wpa_printf(MSG_ERROR,
++					"Multi-AP: Not enough buffer for Assoc req frame element");
++			return;
++		}
++		u8 *pos = wpa_s->sme.assoc_req_ie + wpa_s->sme.assoc_req_ie_len;
++		wpa_add_multi_ap_info_ie(pos, &wpa_s->sme.assoc_req_ie_len);
++	}
++#endif /* CONFIG_MULTI_AP */
++
+ 	params.bssid = bssid;
+ 	params.ssid = wpa_s->sme.ssid;
+ 	params.ssid_len = wpa_s->sme.ssid_len;
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+index 1941fd310..988993843 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -331,6 +331,23 @@ void wpa_supplicant_cancel_auth_timeout(struct wpa_supplicant *wpa_s)
+ 	wpa_blacklist_del(wpa_s, wpa_s->bssid);
+ }
+ 
++#ifdef CONFIG_MULTI_AP
++void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len)
++{
++	u8 *buf = pos;
++
++	*buf++ = WLAN_EID_VENDOR_SPECIFIC;
++	*buf++ = 7; /* len */
++	WPA_PUT_BE24(buf, OUI_WFA);
++	buf += 3;
++	*buf++ = MULTI_AP_OUI_TYPE;
++	*buf++ = MULTI_AP_SUB_ELEM_TYPE;
++	*buf++ = 1; /*sub element len */
++	*buf++ = MULTI_AP_BACKHAUL_STA;
++
++	*len += (buf - pos);
++}
++#endif /* CONFIG_MULTI_AP */
+ 
+ /**
+  * wpa_supplicant_initiate_eapol - Configure EAPOL state machine
+@@ -2837,6 +2854,11 @@ static u8 * wpas_populate_assoc_ies(
+ 	}
+ #endif /* CONFIG_IEEE80211R */
+ 
++#ifdef CONFIG_MULTI_AP
++	if (ssid->multiap_backhaul_sta && ((max_wpa_ie_len - wpa_ie_len) > 9))
++		wpa_add_multi_ap_info_ie(wpa_ie, &wpa_ie_len);
++#endif /* CONFIG_MULTI_AP */
++
+ 	params->wpa_ie = wpa_ie;
+ 	params->wpa_ie_len = wpa_ie_len;
+ 	params->auth_alg = algs;
+@@ -3316,6 +3338,13 @@ void wpa_supplicant_deauthenticate(struct wpa_supplicant *wpa_s,
+ 		zero_addr = 1;
+ 	}
+ 
++#ifdef CONFIG_MULTI_AP
++	if (wpa_s->enabled_4addr_mode) {
++		if (wpa_drv_set_4addr_mode(wpa_s, 0))
++			wpa_s->enabled_4addr_mode = 0;
++	}
++#endif
++
+ #ifdef CONFIG_TDLS
+ 	wpa_tdls_teardown_peers(wpa_s->wpa);
+ #endif /* CONFIG_TDLS */
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index 0d50001d8..1b7e6fb3d 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -1420,6 +1420,10 @@ fast_reauth=1
+ # Transitioning between states).
+ #fst_llt=100
+ 
++# Set satation to use as BACKHAUL STA.
++# default = 0
++# multiap_backhaul_sta = 1 (configure as backhaul STA).
++
+ # Example blocks:
+ 
+ # Simple case: WPA-PSK, PSK as an ASCII passphrase, allow all valid ciphers
+diff --git a/wpa_supplicant/wpa_supplicant_i.h b/wpa_supplicant/wpa_supplicant_i.h
+index 87ae64db7..c5a49804f 100644
+--- a/wpa_supplicant/wpa_supplicant_i.h
++++ b/wpa_supplicant/wpa_supplicant_i.h
+@@ -1234,6 +1234,9 @@ struct wpa_supplicant {
+ 	unsigned int disable_fils:1;
+ #endif /* CONFIG_FILS */
+ 	unsigned int ieee80211ac:1;
++#ifdef CONFIG_MULTI_AP
++	char enabled_4addr_mode;
++#endif
+ };
+ 
+ 
+@@ -1490,4 +1493,7 @@ int wpas_ctrl_iface_get_pref_freq_list_override(struct wpa_supplicant *wpa_s,
+ int wpa_is_fils_supported(struct wpa_supplicant *wpa_s);
+ int wpa_is_fils_sk_pfs_supported(struct wpa_supplicant *wpa_s);
+ 
++#ifdef CONFIG_MULTI_AP
++void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len);
++#endif
+ #endif /* WPA_SUPPLICANT_I_H */
+-- 
+2.19.2
+

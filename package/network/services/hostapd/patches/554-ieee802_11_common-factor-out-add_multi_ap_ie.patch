@@ -1,0 +1,194 @@
+From 8678456dd737d93ec97edc1d43655f046abc5b00 Mon Sep 17 00:00:00 2001
+From: "Arnout Vandecappelle (Essensium/Mind)" <arnout@mind.be>
+Date: Tue, 4 Dec 2018 11:03:01 +0100
+Subject: [PATCH] ieee802_11_common: factor out add_multi_ap_ie()
+
+The multi-AP information element is constructed separately in
+hostapd_eid_multi_ap() and wpa_add_multi_ap_info_ie(). Replace these
+with a single function add_multi_ap_ie() which takes the value of the IE
+as argument.
+
+Although this does not save any lines of code since the caller still has
+to do error handling, it does make the code more readable.
+
+While we're at it, also error out when the IE doesn't fit in the buffer.
+Indeed, leaving out the IE and still assuming that the link is a
+backhaul link will be wrong (one side will set 4addr mode and the other
+will not).
+
+Note that proper handling in case the buffer is too small is missing in
+hostapd_eid_multi_ap(), but the same is true for the rest of the file.
+
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+---
+ src/ap/ieee802_11.c               | 20 ++++++--------------
+ src/common/ieee802_11_common.c    | 20 ++++++++++++++++++++
+ src/common/ieee802_11_common.h    |  2 ++
+ wpa_supplicant/sme.c              | 13 +++++++------
+ wpa_supplicant/wpa_supplicant.c   | 27 ++++++++++-----------------
+ wpa_supplicant/wpa_supplicant_i.h |  1 -
+ 6 files changed, 45 insertions(+), 38 deletions(-)
+
+diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
+index 66438900d..39e11c4a4 100644
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -64,24 +64,16 @@ prepare_auth_resp_fils(struct hostapd_data *hapd,
+ 
+ u8 * hostapd_eid_multi_ap(struct hostapd_data *hapd, u8 *eid)
+ {
+-	u8 sub_elem_val = 0;
+-
+-	*eid++ = WLAN_EID_VENDOR_SPECIFIC;
+-	*eid++ = 7; /* len */
+-	WPA_PUT_BE24(eid, OUI_WFA);
+-	eid += 3;
+-	*eid++ = MULTI_AP_OUI_TYPE;
+-	*eid++ = MULTI_AP_SUB_ELEM_TYPE;
+-	*eid++ = 1; /* sub elem len */
++	u8 multi_ap_val = 0;
+ 
++	if (!hapd->conf->multi_ap)
++		return eid;
+ 	if (hapd->conf->multi_ap & BACKHAUL_BSS)
+-		sub_elem_val |= MULTI_AP_BACKHAUL_BSS;
++		multi_ap_val |= MULTI_AP_BACKHAUL_BSS;
+ 	if (hapd->conf->multi_ap & FRONTHAUL_BSS)
+-		sub_elem_val |= MULTI_AP_FRONTHAUL_BSS;
+-	*eid++ = sub_elem_val;
+-
++		multi_ap_val |= MULTI_AP_FRONTHAUL_BSS;
+ 
+-	return eid;
++	return eid + add_multi_ap_ie(eid, 9, multi_ap_val);
+ }
+ 
+ u8 * hostapd_eid_supp_rates(struct hostapd_data *hapd, u8 *eid)
+diff --git a/src/common/ieee802_11_common.c b/src/common/ieee802_11_common.c
+index 397de8516..ac06c5f86 100644
+--- a/src/common/ieee802_11_common.c
++++ b/src/common/ieee802_11_common.c
+@@ -1523,6 +1523,26 @@ size_t mbo_add_ie(u8 *buf, size_t len, const u8 *attr, size_t attr_len)
+ }
+ 
+ 
++size_t add_multi_ap_ie(u8 *buf, size_t len, u8 value)
++{
++	u8 *pos = buf;
++
++	if (len < 9)
++		return 0;
++
++	*pos++ = WLAN_EID_VENDOR_SPECIFIC;
++	*pos++ = 7; /* len */
++	WPA_PUT_BE24(pos, OUI_WFA);
++	pos += 3;
++	*pos++ = MULTI_AP_OUI_TYPE;
++	*pos++ = MULTI_AP_SUB_ELEM_TYPE;
++	*pos++ = 1; /* len */
++	*pos++ = value;
++
++	return pos - buf;
++}
++
++
+ static const struct country_op_class us_op_class[] = {
+ 	{ 1, 115 },
+ 	{ 2, 118 },
+diff --git a/src/common/ieee802_11_common.h b/src/common/ieee802_11_common.h
+index f602f8799..ae9fa2e14 100644
+--- a/src/common/ieee802_11_common.h
++++ b/src/common/ieee802_11_common.h
+@@ -191,6 +191,8 @@ const u8 * get_ie_ext(const u8 *ies, size_t len, u8 ext);
+ 
+ size_t mbo_add_ie(u8 *buf, size_t len, const u8 *attr, size_t attr_len);
+ 
++size_t add_multi_ap_ie(u8 *buf, size_t len, u8 value);
++
+ struct country_op_class {
+ 	u8 country_op_class;
+ 	u8 global_op_class;
+diff --git a/wpa_supplicant/sme.c b/wpa_supplicant/sme.c
+index d8b973734..41777b8f7 100644
+--- a/wpa_supplicant/sme.c
++++ b/wpa_supplicant/sme.c
+@@ -1462,14 +1462,15 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
+ #endif /* CONFIG_OWE */
+ 
+ 	if (wpa_s->conf->ssid->multi_ap_backhaul_sta) {
+-		if (wpa_s->sme.assoc_req_ie_len + 9 >
+-		    sizeof(wpa_s->sme.assoc_req_ie)) {
+-			wpa_printf(MSG_ERROR,
+-					"Multi-AP: Not enough buffer for Assoc req frame element");
++		size_t multi_ap_ie_len = add_multi_ap_ie(
++			wpa_s->sme.assoc_req_ie + wpa_s->sme.assoc_req_ie_len,
++			sizeof(wpa_s->sme.assoc_req_ie) - wpa_s->sme.assoc_req_ie_len,
++			MULTI_AP_BACKHAUL_STA);
++		if (multi_ap_ie_len == 0) {
++			wpa_printf(MSG_ERROR, "Multi-AP: Failed to build Multi-AP IE");
+ 			return;
+ 		}
+-		u8 *pos = wpa_s->sme.assoc_req_ie + wpa_s->sme.assoc_req_ie_len;
+-		wpa_add_multi_ap_info_ie(pos, &wpa_s->sme.assoc_req_ie_len);
++		wpa_s->sme.assoc_req_ie_len += multi_ap_ie_len;
+ 	}
+ 
+ 	params.bssid = bssid;
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+index 75df8c2a8..c03b97277 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -331,21 +331,6 @@ void wpa_supplicant_cancel_auth_timeout(struct wpa_supplicant *wpa_s)
+ 	wpa_blacklist_del(wpa_s, wpa_s->bssid);
+ }
+ 
+-void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len)
+-{
+-	u8 *buf = pos;
+-
+-	*buf++ = WLAN_EID_VENDOR_SPECIFIC;
+-	*buf++ = 7; /* len */
+-	WPA_PUT_BE24(buf, OUI_WFA);
+-	buf += 3;
+-	*buf++ = MULTI_AP_OUI_TYPE;
+-	*buf++ = MULTI_AP_SUB_ELEM_TYPE;
+-	*buf++ = 1; /*sub element len */
+-	*buf++ = MULTI_AP_BACKHAUL_STA;
+-
+-	*len += (buf - pos);
+-}
+ 
+ /**
+  * wpa_supplicant_initiate_eapol - Configure EAPOL state machine
+@@ -2852,8 +2837,16 @@ static u8 * wpas_populate_assoc_ies(
+ 	}
+ #endif /* CONFIG_IEEE80211R */
+ 
+-	if (ssid->multi_ap_backhaul_sta && ((max_wpa_ie_len - wpa_ie_len) > 9))
+-		wpa_add_multi_ap_info_ie(wpa_ie, &wpa_ie_len);
++	if (ssid->multi_ap_backhaul_sta) {
++		size_t multi_ap_ie_len = add_multi_ap_ie(wpa_ie + wpa_ie_len,
++			 max_wpa_ie_len - wpa_ie_len, MULTI_AP_BACKHAUL_STA);
++		if (multi_ap_ie_len == 0) {
++			wpa_printf(MSG_ERROR, "Multi-AP: Failed to build Multi-AP IE");
++			os_free(wpa_ie);
++			return NULL;
++		}
++		wpa_ie_len += multi_ap_ie_len;
++	}
+ 
+ 	params->wpa_ie = wpa_ie;
+ 	params->wpa_ie_len = wpa_ie_len;
+diff --git a/wpa_supplicant/wpa_supplicant_i.h b/wpa_supplicant/wpa_supplicant_i.h
+index 40dbf21c1..a4de0f7d1 100644
+--- a/wpa_supplicant/wpa_supplicant_i.h
++++ b/wpa_supplicant/wpa_supplicant_i.h
+@@ -1491,5 +1491,4 @@ int wpas_ctrl_iface_get_pref_freq_list_override(struct wpa_supplicant *wpa_s,
+ int wpa_is_fils_supported(struct wpa_supplicant *wpa_s);
+ int wpa_is_fils_sk_pfs_supported(struct wpa_supplicant *wpa_s);
+ 
+-void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len);
+ #endif /* WPA_SUPPLICANT_I_H */
+-- 
+2.19.2
+

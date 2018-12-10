@@ -1,0 +1,403 @@
+From e1165e9d66ba0a555e933f22d3bc912583730f31 Mon Sep 17 00:00:00 2001
+From: "Arnout Vandecappelle (Essensium/Mind)" <arnout@mind.be>
+Date: Mon, 3 Dec 2018 15:35:39 +0100
+Subject: [PATCH] Remove CONFIG_MULTI_AP
+
+The difference in code size is less than 1KB (tested on arm64) and the
+runtime overhead seems neglible as well.
+
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+Cc: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+---
+ hostapd/Makefile                  | 4 ----
+ hostapd/config_file.c             | 2 --
+ hostapd/defconfig                 | 3 ---
+ src/ap/ap_config.h                | 2 --
+ src/ap/ieee802_11.c               | 6 ------
+ src/common/ieee802_11_defs.h      | 2 --
+ src/drivers/driver.h              | 2 --
+ src/drivers/driver_nl80211.c      | 4 ----
+ wpa_supplicant/Makefile           | 4 ----
+ wpa_supplicant/config.c           | 2 --
+ wpa_supplicant/config_ssid.h      | 2 --
+ wpa_supplicant/defconfig          | 3 ---
+ wpa_supplicant/driver_i.h         | 2 --
+ wpa_supplicant/events.c           | 4 ----
+ wpa_supplicant/sme.c              | 2 --
+ wpa_supplicant/wpa_supplicant.c   | 6 ------
+ wpa_supplicant/wpa_supplicant_i.h | 4 ----
+ 17 files changed, 54 deletions(-)
+
+diff --git a/hostapd/Makefile b/hostapd/Makefile
+index 849856c03..e47d2af36 100644
+--- a/hostapd/Makefile
++++ b/hostapd/Makefile
+@@ -62,10 +62,6 @@ CFLAGS += -DCONFIG_NATIVE_WINDOWS
+ LIBS += -lws2_32
+ endif
+ 
+-ifdef CONFIG_MULTI_AP
+-CFLAGS += -DCONFIG_MULTI_AP
+-endif
+-
+ OBJS += main.o
+ OBJS += config_file.o
+ 
+diff --git a/hostapd/config_file.c b/hostapd/config_file.c
+index 28894a98b..c39dd74ff 100644
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -4007,7 +4007,6 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 			return 1;
+ 		}
+ #endif /* CONFIG_OWE */
+-#ifdef CONFIG_MULTI_AP
+ 	} else if (os_strcmp(buf, "multi_ap") == 0) {
+ 		int val = atoi(pos);
+ 
+@@ -4019,7 +4018,6 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 		}
+ 
+ 		bss->multi_ap = val;
+-#endif /*CONFIG_MULTI_AP */
+ 	} else {
+ 		wpa_printf(MSG_ERROR,
+ 			   "Line %d: unknown configuration item '%s'",
+diff --git a/hostapd/defconfig b/hostapd/defconfig
+index 123b060ba..c67c6622d 100644
+--- a/hostapd/defconfig
++++ b/hostapd/defconfig
+@@ -373,6 +373,3 @@ CONFIG_IPV6=y
+ # Override default value for the wpa_disable_eapol_key_retries configuration
+ # parameter. See that parameter in hostapd.conf for more details.
+ #CFLAGS += -DDEFAULT_WPA_DISABLE_EAPOL_KEY_RETRIES=1
+-
+-#Multi-AP protocol support
+-CONFIG_MULTI_AP=y
+diff --git a/src/ap/ap_config.h b/src/ap/ap_config.h
+index 3910dfe13..61f126f7c 100644
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -683,9 +683,7 @@ struct hostapd_bss_config {
+ 	int *owe_groups;
+ #endif /* CONFIG_OWE */
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	int multi_ap;
+-#endif /*CONFIG_MULTI_AP */
+ };
+ 
+ /**
+diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
+index 566851751..66438900d 100644
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -64,7 +64,6 @@ prepare_auth_resp_fils(struct hostapd_data *hapd,
+ 
+ u8 * hostapd_eid_multi_ap(struct hostapd_data *hapd, u8 *eid)
+ {
+-#ifdef CONFIG_MULTI_AP
+ 	u8 sub_elem_val = 0;
+ 
+ 	*eid++ = WLAN_EID_VENDOR_SPECIFIC;
+@@ -81,7 +80,6 @@ u8 * hostapd_eid_multi_ap(struct hostapd_data *hapd, u8 *eid)
+ 		sub_elem_val |= MULTI_AP_FRONTHAUL_BSS;
+ 	*eid++ = sub_elem_val;
+ 
+-#endif /* CONFIG_MULTI_AP */
+ 
+ 	return eid;
+ }
+@@ -2204,7 +2202,6 @@ static u16 check_wmm(struct hostapd_data *hapd, struct sta_info *sta,
+ 	return WLAN_STATUS_SUCCESS;
+ }
+ 
+-#ifdef CONFIG_MULTI_AP
+ static u16 hostapd_validate_multi_ap_ie(struct hostapd_data *hapd,
+ 					struct sta_info *sta,
+ 					struct ieee802_11_elems *elems)
+@@ -2231,7 +2228,6 @@ static u16 hostapd_validate_multi_ap_ie(struct hostapd_data *hapd,
+ 
+ 	return WLAN_STATUS_SUCCESS;
+ }
+-#endif /* CONFIG_MULTI_AP */
+ 
+ static u16 copy_supp_rates(struct hostapd_data *hapd, struct sta_info *sta,
+ 			   struct ieee802_11_elems *elems)
+@@ -2489,11 +2485,9 @@ static u16 check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
+ 	if (resp != WLAN_STATUS_SUCCESS)
+ 		return resp;
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	resp = hostapd_validate_multi_ap_ie(hapd, sta, &elems);
+ 	if (resp != WLAN_STATUS_SUCCESS)
+ 		return resp;
+-#endif /* CONFIG_MULTI_AP */
+ 
+ #ifdef CONFIG_IEEE80211N
+ 	resp = copy_sta_ht_capab(hapd, sta, elems.ht_capabilities);
+diff --git a/src/common/ieee802_11_defs.h b/src/common/ieee802_11_defs.h
+index 72d4878d2..50e0fe3de 100644
+--- a/src/common/ieee802_11_defs.h
++++ b/src/common/ieee802_11_defs.h
+@@ -1202,14 +1202,12 @@ struct ieee80211_ampe_ie {
+ #define OWE_OUI_TYPE 28
+ #define MULTI_AP_OUI_TYPE 0x1B
+ 
+-#ifdef CONFIG_MULTI_AP
+ #define MULTI_AP_SUB_ELEM_TYPE 0x06
+ #define MULTI_AP_BACKHAUL_BSS 0x40
+ #define MULTI_AP_FRONTHAUL_BSS 0x20
+ #define MULTI_AP_BACKHAUL_STA 0x80
+ #define BACKHAUL_BSS 1
+ #define FRONTHAUL_BSS 2
+-#endif /* CONFIG_MULTI_AP */
+ 
+ #define WMM_OUI_TYPE 2
+ #define WMM_OUI_SUBTYPE_INFORMATION_ELEMENT 0
+diff --git a/src/drivers/driver.h b/src/drivers/driver.h
+index 2da1293eb..70b74869f 100644
+--- a/src/drivers/driver.h
++++ b/src/drivers/driver.h
+@@ -4074,7 +4074,6 @@ struct wpa_driver_ops {
+ 	int (*send_external_auth_status)(void *priv,
+ 					 struct external_auth *params);
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	/**
+ 	 * set_4addr_mode - Set 4address mode
+ 	 * @priv: Private driver interface data
+@@ -4083,7 +4082,6 @@ struct wpa_driver_ops {
+ 	 * @brige_ifname - Bridge interface name
+ 	 */
+ 	int (*set_4addr_mode)(void *priv, const char *dridge_ifname, int val);
+-#endif /* CONFIG_MULTI_AP */
+ };
+ 
+ /**
+diff --git a/src/drivers/driver_nl80211.c b/src/drivers/driver_nl80211.c
+index b0bc7fefb..5dfe9ce62 100644
+--- a/src/drivers/driver_nl80211.c
++++ b/src/drivers/driver_nl80211.c
+@@ -10622,7 +10622,6 @@ fail:
+ 	return ret;
+ }
+ 
+-#ifdef CONFIG_MULTI_AP
+ static int nl80211_set_4addr_mode(void *priv, const char *bridge_ifname,
+ 				  int val)
+ {
+@@ -10663,7 +10662,6 @@ fail:
+ 
+ 	return ret;
+ }
+-#endif /* CONFIG_MULTI_AP */
+ 
+ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
+ 	.name = "nl80211",
+@@ -10793,7 +10791,5 @@ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
+ 	.get_ext_capab = nl80211_get_ext_capab,
+ 	.update_connect_params = nl80211_update_connection_params,
+ 	.send_external_auth_status = nl80211_send_external_auth_status,
+-#ifdef CONFIG_MULTI_AP
+ 	.set_4addr_mode = nl80211_set_4addr_mode,
+-#endif /* CONFIG_MULTI_AP */
+ };
+diff --git a/wpa_supplicant/Makefile b/wpa_supplicant/Makefile
+index 5e84f42f9..77e704676 100644
+--- a/wpa_supplicant/Makefile
++++ b/wpa_supplicant/Makefile
+@@ -101,10 +101,6 @@ CONFIG_NO_RANDOM_POOL=
+ CONFIG_OPENSSL_CMAC=y
+ endif
+ 
+-ifdef CONFIG_MULTI_AP
+-CFLAGS += -DCONFIG_MULTI_AP
+-endif
+-
+ OBJS = config.o
+ OBJS += notify.o
+ OBJS += bss.o
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index 858ea0690..66106ddae 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -2400,9 +2400,7 @@ static const struct parse_data ssid_fields[] = {
+ #endif /* CONFIG_DPP */
+ 	{ INT_RANGE(owe_group, 0, 65535) },
+ 	{ INT_RANGE(owe_only, 0, 1) },
+-#ifdef CONFIG_MULTI_AP
+ 	{ INT_RANGE(multiap_backhaul_sta, 0, 1) },
+-#endif
+ };
+ 
+ #undef OFFSET
+diff --git a/wpa_supplicant/config_ssid.h b/wpa_supplicant/config_ssid.h
+index 31055e6c5..3bd116cc1 100644
+--- a/wpa_supplicant/config_ssid.h
++++ b/wpa_supplicant/config_ssid.h
+@@ -941,13 +941,11 @@ struct wpa_ssid {
+ 	 */
+ 	int owe_only;
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	/*
+ 	 * 0 = normal station
+ 	 * 1 = backhaul station
+ 	 */
+ 	int multiap_backhaul_sta;
+-#endif /* CONFIG_MULTI_AP */
+ };
+ 
+ #endif /* CONFIG_SSID_H */
+diff --git a/wpa_supplicant/defconfig b/wpa_supplicant/defconfig
+index 3c3081c95..08f585779 100644
+--- a/wpa_supplicant/defconfig
++++ b/wpa_supplicant/defconfig
+@@ -593,6 +593,3 @@ CONFIG_BACKEND=file
+ # Opportunistic Wireless Encryption (OWE)
+ # Experimental implementation of draft-harkins-owe-07.txt
+ #CONFIG_OWE=y
+-
+-#Multi-AP protocol support
+-#CONFIG_MULTI_AP=y
+diff --git a/wpa_supplicant/driver_i.h b/wpa_supplicant/driver_i.h
+index 9c1a26d8b..918094025 100644
+--- a/wpa_supplicant/driver_i.h
++++ b/wpa_supplicant/driver_i.h
+@@ -30,7 +30,6 @@ static inline void wpa_drv_deinit(struct wpa_supplicant *wpa_s)
+ 		wpa_s->driver->deinit(wpa_s->drv_priv);
+ }
+ 
+-#ifdef CONFIG_MULTI_AP
+ static inline int wpa_drv_set_4addr_mode(struct wpa_supplicant *wpa_s, int val)
+ {
+ 	if (wpa_s->driver->set_4addr_mode)
+@@ -38,7 +37,6 @@ static inline int wpa_drv_set_4addr_mode(struct wpa_supplicant *wpa_s, int val)
+ 						     wpa_s->bridge_ifname, val);
+ 	return -1;
+ }
+-#endif /* CONFIG_MULTI_AP */
+ 
+ static inline int wpa_drv_set_param(struct wpa_supplicant *wpa_s,
+ 				    const char *param)
+diff --git a/wpa_supplicant/events.c b/wpa_supplicant/events.c
+index 4b6e28788..ddb3fbab9 100644
+--- a/wpa_supplicant/events.c
++++ b/wpa_supplicant/events.c
+@@ -2228,7 +2228,6 @@ static void interworking_process_assoc_resp(struct wpa_supplicant *wpa_s,
+ 
+ #endif /* CONFIG_INTERWORKING */
+ 
+-#ifdef CONFIG_MULTI_AP
+ static void multi_ap_process_assoc_resp(struct wpa_supplicant *wpa_s,
+ 					const u8 *ies, size_t ies_len)
+ {
+@@ -2276,7 +2275,6 @@ fail:
+ 	wpa_supplicant_deauthenticate(wpa_s, WLAN_REASON_DEAUTH_LEAVING);
+ 	return;
+ }
+-#endif /* CONFIG_MULTI_AP */
+ 
+ #ifdef CONFIG_FST
+ static int wpas_fst_update_mbie(struct wpa_supplicant *wpa_s,
+@@ -2354,10 +2352,8 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
+ 		    get_ie(data->assoc_info.resp_ies,
+ 			   data->assoc_info.resp_ies_len, WLAN_EID_VHT_CAP))
+ 			wpa_s->ieee80211ac = 1;
+-#ifdef CONFIG_MULTI_AP
+ 		multi_ap_process_assoc_resp(wpa_s, data->assoc_info.resp_ies,
+ 					    data->assoc_info.resp_ies_len);
+-#endif /* CONFIG_MULTI_AP */
+ 	}
+ 	if (data->assoc_info.beacon_ies)
+ 		wpa_hexdump(MSG_DEBUG, "beacon_ies",
+diff --git a/wpa_supplicant/sme.c b/wpa_supplicant/sme.c
+index cdbdfc063..b663dfd2e 100644
+--- a/wpa_supplicant/sme.c
++++ b/wpa_supplicant/sme.c
+@@ -1461,7 +1461,6 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
+ 	}
+ #endif /* CONFIG_OWE */
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	if (wpa_s->conf->ssid->multiap_backhaul_sta) {
+ 		if (wpa_s->sme.assoc_req_ie_len + 9 >
+ 		    sizeof(wpa_s->sme.assoc_req_ie)) {
+@@ -1472,7 +1471,6 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
+ 		u8 *pos = wpa_s->sme.assoc_req_ie + wpa_s->sme.assoc_req_ie_len;
+ 		wpa_add_multi_ap_info_ie(pos, &wpa_s->sme.assoc_req_ie_len);
+ 	}
+-#endif /* CONFIG_MULTI_AP */
+ 
+ 	params.bssid = bssid;
+ 	params.ssid = wpa_s->sme.ssid;
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+index 988993843..4eef0e5a1 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -331,7 +331,6 @@ void wpa_supplicant_cancel_auth_timeout(struct wpa_supplicant *wpa_s)
+ 	wpa_blacklist_del(wpa_s, wpa_s->bssid);
+ }
+ 
+-#ifdef CONFIG_MULTI_AP
+ void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len)
+ {
+ 	u8 *buf = pos;
+@@ -347,7 +346,6 @@ void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len)
+ 
+ 	*len += (buf - pos);
+ }
+-#endif /* CONFIG_MULTI_AP */
+ 
+ /**
+  * wpa_supplicant_initiate_eapol - Configure EAPOL state machine
+@@ -2854,10 +2852,8 @@ static u8 * wpas_populate_assoc_ies(
+ 	}
+ #endif /* CONFIG_IEEE80211R */
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	if (ssid->multiap_backhaul_sta && ((max_wpa_ie_len - wpa_ie_len) > 9))
+ 		wpa_add_multi_ap_info_ie(wpa_ie, &wpa_ie_len);
+-#endif /* CONFIG_MULTI_AP */
+ 
+ 	params->wpa_ie = wpa_ie;
+ 	params->wpa_ie_len = wpa_ie_len;
+@@ -3338,12 +3334,10 @@ void wpa_supplicant_deauthenticate(struct wpa_supplicant *wpa_s,
+ 		zero_addr = 1;
+ 	}
+ 
+-#ifdef CONFIG_MULTI_AP
+ 	if (wpa_s->enabled_4addr_mode) {
+ 		if (wpa_drv_set_4addr_mode(wpa_s, 0))
+ 			wpa_s->enabled_4addr_mode = 0;
+ 	}
+-#endif
+ 
+ #ifdef CONFIG_TDLS
+ 	wpa_tdls_teardown_peers(wpa_s->wpa);
+diff --git a/wpa_supplicant/wpa_supplicant_i.h b/wpa_supplicant/wpa_supplicant_i.h
+index c5a49804f..40dbf21c1 100644
+--- a/wpa_supplicant/wpa_supplicant_i.h
++++ b/wpa_supplicant/wpa_supplicant_i.h
+@@ -1234,9 +1234,7 @@ struct wpa_supplicant {
+ 	unsigned int disable_fils:1;
+ #endif /* CONFIG_FILS */
+ 	unsigned int ieee80211ac:1;
+-#ifdef CONFIG_MULTI_AP
+ 	char enabled_4addr_mode;
+-#endif
+ };
+ 
+ 
+@@ -1493,7 +1491,5 @@ int wpas_ctrl_iface_get_pref_freq_list_override(struct wpa_supplicant *wpa_s,
+ int wpa_is_fils_supported(struct wpa_supplicant *wpa_s);
+ int wpa_is_fils_sk_pfs_supported(struct wpa_supplicant *wpa_s);
+ 
+-#ifdef CONFIG_MULTI_AP
+ void wpa_add_multi_ap_info_ie(u8 *pos, size_t *len);
+-#endif
+ #endif /* WPA_SUPPLICANT_I_H */
+-- 
+2.19.2
+

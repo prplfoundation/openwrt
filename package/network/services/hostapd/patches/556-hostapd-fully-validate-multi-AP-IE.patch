@@ -1,0 +1,132 @@
+From bc3fc51bac9f2ab530481854cd44e3c874a6bbb7 Mon Sep 17 00:00:00 2001
+From: "Arnout Vandecappelle (Essensium/Mind)" <arnout@mind.be>
+Date: Tue, 4 Dec 2018 12:18:38 +0100
+Subject: [PATCH] hostapd: fully validate multi-AP IE
+
+The validation of the multi-AP IE in hostapd is not very complete.
+
+* When the IE is incorrectly constructed, return WLAN_STATUS_INVALID_IE.
+This might not be entirely the right thing to do, since that status is
+in principle reserved for IEs specified in IEEE 802.11-2016, but it
+makes sense to use that for incorrect subelements as well, and it's done
+in other places.
+
+* When the AP is configured as fronthaul-only, association requests for
+backhaul STA are rejected.
+
+* When the AP is configured as backhaul-only, association requests
+without backhaul STA are rejected.
+
+* A multi-AP IE with a value different than MULTI_AP_BACKHAUL_STA is
+ignored (i.e. treated the same as if it was missing).
+
+* Rejections use reason WLAN_STATUS_ASSOC_DENIED_UNSPEC instead of
+WLAN_STATUS_UNSPECIFIED_FAILURE - that seems a better match with the
+IEEE 802.11-2016 specification.
+
+* Set the WLAN_STA_MULTI_AP based on the IE, independent of whether it
+is a backhaul or fronthaul AP. This makes sure that the Association
+Response contains the IE even if it is a rejection.
+
+None of the above is explicitly specified in the Multi-AP Specification.
+However, it is pretty clear that we only want backhaul stations on a
+backhaul-only AP and only fronthaul stations on a fronhaul-only AP,
+otherwise the distinction is pointless.
+
+Finally, rename hostapd_validate_multi_ap_ie() to check_multi_ap() and
+directly give it the multi_ap_ie as argument rather than the
+ieee802_11_elems, since that is how most other functions in that file
+work.
+
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+---
+ src/ap/ieee802_11.c | 58 +++++++++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 18 deletions(-)
+
+diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
+index 39e11c4a4..37f588d2c 100644
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -2194,31 +2194,53 @@ static u16 check_wmm(struct hostapd_data *hapd, struct sta_info *sta,
+ 	return WLAN_STATUS_SUCCESS;
+ }
+ 
+-static u16 hostapd_validate_multi_ap_ie(struct hostapd_data *hapd,
+-					struct sta_info *sta,
+-					struct ieee802_11_elems *elems)
++static u16 check_multi_ap(struct hostapd_data *hapd, struct sta_info *sta,
++					const u8 *multi_ap_ie, size_t multi_ap_len)
+ {
+-	const u8 *pos, *map_sub_elem;
+-	size_t len;
++	u8 multi_ap_value = 0;
+ 
+-	if (!hapd->conf->multi_ap || !elems->multi_ap)
++	sta->flags &= ~WLAN_STA_MULTI_AP;
++
++	if (!hapd->conf->multi_ap)
+ 		return WLAN_STATUS_SUCCESS;
+ 
+-	pos = elems->multi_ap + 4;/* OUI[3] and OUT_TYPE 1 */
+-	len = elems->multi_ap_len - 4;
++	if (multi_ap_ie) {
++		const u8 *multi_ap_subelem = get_ie(multi_ap_ie + 4,
++						    multi_ap_len - 4,
++						    MULTI_AP_SUB_ELEM_TYPE);
++		if (multi_ap_subelem &&
++		    multi_ap_subelem[1] == 1)
++			multi_ap_value = multi_ap_subelem[2];
++		else {
++			hostapd_logger(hapd, sta->addr,
++				       HOSTAPD_MODULE_IEEE80211,
++				       HOSTAPD_LEVEL_INFO,
++				       "Multi-AP IE has missing or invalid Multi-AP subelement");
++			return WLAN_STATUS_INVALID_IE;
++		}
++	}
+ 
+-	sta->flags &= ~WLAN_STA_MULTI_AP;
++	if (multi_ap_value == MULTI_AP_BACKHAUL_STA)
++		sta->flags |= WLAN_STA_MULTI_AP;
+ 
+-	map_sub_elem = get_ie(pos, len, MULTI_AP_SUB_ELEM_TYPE);
++	if (hapd->conf->multi_ap & BACKHAUL_BSS &&
++	    multi_ap_value == MULTI_AP_BACKHAUL_STA)
++		return WLAN_STATUS_SUCCESS;
+ 
+-	if (map_sub_elem) {
+-		if (map_sub_elem[1] < 1)
+-			return WLAN_STATUS_UNSPECIFIED_FAILURE;
+-		if (map_sub_elem[2] & MULTI_AP_BACKHAUL_STA)
+-			sta->flags |= WLAN_STA_MULTI_AP;
++	if (hapd->conf->multi_ap & FRONTHAUL_BSS) {
++		if (multi_ap_value == MULTI_AP_BACKHAUL_STA) {
++			hostapd_logger(hapd, sta->addr,
++				       HOSTAPD_MODULE_IEEE80211,
++				       HOSTAPD_LEVEL_INFO,
++				       "Backhaul STA tries to associate with fronthaul-only BSS");
++			return WLAN_STATUS_ASSOC_DENIED_UNSPEC;
++		}
++		return WLAN_STATUS_SUCCESS;
+ 	}
+-
+-	return WLAN_STATUS_SUCCESS;
++	hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
++		       HOSTAPD_LEVEL_INFO,
++		       "Non-Multi-AP STA tries to associate with backhaul-only BSS");
++	return WLAN_STATUS_ASSOC_DENIED_UNSPEC;
+ }
+ 
+ static u16 copy_supp_rates(struct hostapd_data *hapd, struct sta_info *sta,
+@@ -2477,7 +2499,7 @@ static u16 check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
+ 	if (resp != WLAN_STATUS_SUCCESS)
+ 		return resp;
+ 
+-	resp = hostapd_validate_multi_ap_ie(hapd, sta, &elems);
++	resp = check_multi_ap(hapd, sta, elems.multi_ap, elems.multi_ap_len);
+ 	if (resp != WLAN_STATUS_SUCCESS)
+ 		return resp;
+ 
+-- 
+2.19.2
+

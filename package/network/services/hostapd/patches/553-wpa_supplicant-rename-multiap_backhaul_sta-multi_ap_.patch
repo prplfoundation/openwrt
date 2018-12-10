@@ -1,0 +1,100 @@
+From 44c8e904a9086a4e1f477845ef7e1fe8f6cfcbf9 Mon Sep 17 00:00:00 2001
+From: "Arnout Vandecappelle (Essensium/Mind)" <arnout@mind.be>
+Date: Mon, 3 Dec 2018 15:48:27 +0100
+Subject: [PATCH] wpa_supplicant: rename multiap_backhaul_sta ->
+ multi_ap_backhaul_sta
+
+To be consistent with the other uses of multi_ap in the code.
+
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+Cc: Venkateswara Naralasetty <vnaralas@codeaurora.org>
+---
+ wpa_supplicant/config.c            | 2 +-
+ wpa_supplicant/config_ssid.h       | 2 +-
+ wpa_supplicant/events.c            | 2 +-
+ wpa_supplicant/sme.c               | 2 +-
+ wpa_supplicant/wpa_supplicant.c    | 2 +-
+ wpa_supplicant/wpa_supplicant.conf | 2 +-
+ 6 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index 66106ddae..5bf68da06 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -2400,7 +2400,7 @@ static const struct parse_data ssid_fields[] = {
+ #endif /* CONFIG_DPP */
+ 	{ INT_RANGE(owe_group, 0, 65535) },
+ 	{ INT_RANGE(owe_only, 0, 1) },
+-	{ INT_RANGE(multiap_backhaul_sta, 0, 1) },
++	{ INT_RANGE(multi_ap_backhaul_sta, 0, 1) },
+ };
+ 
+ #undef OFFSET
+diff --git a/wpa_supplicant/config_ssid.h b/wpa_supplicant/config_ssid.h
+index 3bd116cc1..68e0517d3 100644
+--- a/wpa_supplicant/config_ssid.h
++++ b/wpa_supplicant/config_ssid.h
+@@ -945,7 +945,7 @@ struct wpa_ssid {
+ 	 * 0 = normal station
+ 	 * 1 = backhaul station
+ 	 */
+-	int multiap_backhaul_sta;
++	int multi_ap_backhaul_sta;
+ };
+ 
+ #endif /* CONFIG_SSID_H */
+diff --git a/wpa_supplicant/events.c b/wpa_supplicant/events.c
+index ddb3fbab9..ff8ca3463 100644
+--- a/wpa_supplicant/events.c
++++ b/wpa_supplicant/events.c
+@@ -2235,7 +2235,7 @@ static void multi_ap_process_assoc_resp(struct wpa_supplicant *wpa_s,
+ 	const u8 *map_sub_elem, *pos;
+ 	size_t len;
+ 
+-	if (!wpa_s->current_ssid->multiap_backhaul_sta)
++	if (!wpa_s->current_ssid->multi_ap_backhaul_sta)
+ 		return;
+ 
+ 	if (ies == NULL)
+diff --git a/wpa_supplicant/sme.c b/wpa_supplicant/sme.c
+index b663dfd2e..d8b973734 100644
+--- a/wpa_supplicant/sme.c
++++ b/wpa_supplicant/sme.c
+@@ -1461,7 +1461,7 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
+ 	}
+ #endif /* CONFIG_OWE */
+ 
+-	if (wpa_s->conf->ssid->multiap_backhaul_sta) {
++	if (wpa_s->conf->ssid->multi_ap_backhaul_sta) {
+ 		if (wpa_s->sme.assoc_req_ie_len + 9 >
+ 		    sizeof(wpa_s->sme.assoc_req_ie)) {
+ 			wpa_printf(MSG_ERROR,
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+index 4eef0e5a1..75df8c2a8 100644
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -2852,7 +2852,7 @@ static u8 * wpas_populate_assoc_ies(
+ 	}
+ #endif /* CONFIG_IEEE80211R */
+ 
+-	if (ssid->multiap_backhaul_sta && ((max_wpa_ie_len - wpa_ie_len) > 9))
++	if (ssid->multi_ap_backhaul_sta && ((max_wpa_ie_len - wpa_ie_len) > 9))
+ 		wpa_add_multi_ap_info_ie(wpa_ie, &wpa_ie_len);
+ 
+ 	params->wpa_ie = wpa_ie;
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index 1b7e6fb3d..87ecb5a42 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -1422,7 +1422,7 @@ fast_reauth=1
+ 
+ # Set satation to use as BACKHAUL STA.
+ # default = 0
+-# multiap_backhaul_sta = 1 (configure as backhaul STA).
++# multi_ap_backhaul_sta = 1 (configure as backhaul STA).
+ 
+ # Example blocks:
+ 
+-- 
+2.19.2
+

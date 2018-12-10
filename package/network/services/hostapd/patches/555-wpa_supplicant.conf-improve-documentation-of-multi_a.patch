@@ -1,0 +1,43 @@
+From 78f3e6d4a6bb285708062caba7317999f111f21a Mon Sep 17 00:00:00 2001
+From: "Arnout Vandecappelle (Essensium/Mind)" <arnout@mind.be>
+Date: Tue, 4 Dec 2018 11:11:36 +0100
+Subject: [PATCH] wpa_supplicant.conf: improve documentation of
+ multi_ap_backhaul_sta
+
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+---
+ wpa_supplicant/wpa_supplicant.conf | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index 87ecb5a42..35526045d 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -1394,6 +1394,13 @@ fast_reauth=1
+ #  2: MCS 0-9
+ #  3: not supported
+ 
++# multi_ap_backhaul_sta: Multi-AP backhaul STA functionality.
++#  0: normal STA
++#  1: backhaul STA
++# A backhaul STA sends the multi-AP IE, fails to associate if the AP does not
++# support multi-AP, and sets 4-address mode if it does. Thus, the netif can be
++# added to a bridge to allow forwarding frames over this backhaul link.
++
+ ##### Fast Session Transfer (FST) support #####################################
+ #
+ # The options in this section are only available when the build configuration
+@@ -1420,10 +1427,6 @@ fast_reauth=1
+ # Transitioning between states).
+ #fst_llt=100
+ 
+-# Set satation to use as BACKHAUL STA.
+-# default = 0
+-# multi_ap_backhaul_sta = 1 (configure as backhaul STA).
+-
+ # Example blocks:
+ 
+ # Simple case: WPA-PSK, PSK as an ASCII passphrase, allow all valid ciphers
+-- 
+2.19.2
+

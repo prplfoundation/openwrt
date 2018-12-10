@@ -1,0 +1,531 @@
+From 4eb3fc2223533696e551d4e207549dc8b23b6349 Mon Sep 17 00:00:00 2001
+From: Davina Lu <ylu@quantenna.com>
+Date: Fri, 16 Nov 2018 20:32:55 +0000
+Subject: [PATCH] wpa_supplicant: support Multi-AP backhaul STA onboarding
+
+The Wi-Fi Alliance Multi-AP Specification v1.0 allows onboarding of a
+backhaul STA through WPS. To enable this, the backhaul STA needs to add
+a Multi-AP IE to the WFA vendor extension element in the WSC M1 message
+that indicates it supports the Multi-AP backhaul STA role. The registrar
+(if it support Multi-AP onboarding) will respond to that with a WSC M8
+message that also contains the Multi-AP IE, and that contains the
+credentials for the backhaul SSID (which may be different from the SSID
+on which WPS is performed).
+
+Introduce a new, global configuration option multi_ap_backhaul_sta to
+enable this feature. It has to be separate from the per-SSID
+multi_ap_backhaul_sta option since no SSID exists yet when WPS is
+performed. multi_ap_backhaul_sta is set to 1 in the automatically
+created SSID. Thus, if the AP does not support Multi-AP, association
+will fail and WPS will be terminated.
+
+Only wps_pbc is supported.
+
+Extend wps_build_wfa_ext() with an extra argument to add the additional
+subelement to a WPS message, and use this when building M1. Note that we
+don't reuse the existing MULTI_AP_SUB_ELEM_TYPE definition here, but
+rather define a new WFA_ELEM_MULTI_AP, to make sure the enum of WFA
+subelement types remains complete.
+
+Signed-off-by: Davina Lu <ylu@quantenna.com>
+Signed-off-by: Igor Mitsyanko <igor.mitsyanko.os@quantenna.com>
+Signed-off-by: Arnout Vandecappelle (Essensium/Mind) <arnout@mind.be>
+---
+ src/p2p/p2p_build.c                |  2 +-
+ src/wps/wps.c                      |  6 +++---
+ src/wps/wps.h                      |  6 ++++++
+ src/wps/wps_attr_build.c           | 10 +++++++++-
+ src/wps/wps_common.c               | 16 ++++++++--------
+ src/wps/wps_defs.h                 |  3 ++-
+ src/wps/wps_enrollee.c             | 14 +++++++++-----
+ src/wps/wps_er.c                   |  4 ++--
+ src/wps/wps_i.h                    |  3 ++-
+ src/wps/wps_registrar.c            | 14 +++++++-------
+ src/wps/wps_upnp.c                 |  2 +-
+ wpa_supplicant/config.c            |  1 +
+ wpa_supplicant/config.h            |  2 ++
+ wpa_supplicant/config_file.c       |  4 ++++
+ wpa_supplicant/wpa_supplicant.conf |  5 +++++
+ wpa_supplicant/wps_supplicant.c    | 13 ++++++++++++-
+ 16 files changed, 74 insertions(+), 31 deletions(-)
+
+diff --git a/src/p2p/p2p_build.c b/src/p2p/p2p_build.c
+index 2882c6ad0..63eb2e84c 100644
+--- a/src/p2p/p2p_build.c
++++ b/src/p2p/p2p_build.c
+@@ -802,7 +802,7 @@ int p2p_build_wps_ie(struct p2p_data *p2p, struct wpabuf *buf, int pw_id,
+ 		wpabuf_put_be16(buf, p2p->cfg->config_methods);
+ 	}
+ 
+-	if (wps_build_wfa_ext(buf, 0, NULL, 0) < 0)
++	if (wps_build_wfa_ext(buf, 0, NULL, 0, 0) < 0)
+ 		return -1;
+ 
+ 	if (all_attr && p2p->cfg->num_sec_dev_types) {
+diff --git a/src/wps/wps.c b/src/wps/wps.c
+index 8d228270f..c162e793d 100644
+--- a/src/wps/wps.c
++++ b/src/wps/wps.c
+@@ -430,7 +430,7 @@ struct wpabuf * wps_build_assoc_req_ie(enum wps_request_type req_type)
+ 
+ 	if (wps_build_version(ie) ||
+ 	    wps_build_req_type(ie, req_type) ||
+-	    wps_build_wfa_ext(ie, 0, NULL, 0)) {
++	    wps_build_wfa_ext(ie, 0, NULL, 0, 0)) {
+ 		wpabuf_free(ie);
+ 		return NULL;
+ 	}
+@@ -464,7 +464,7 @@ struct wpabuf * wps_build_assoc_resp_ie(void)
+ 
+ 	if (wps_build_version(ie) ||
+ 	    wps_build_resp_type(ie, WPS_RESP_AP) ||
+-	    wps_build_wfa_ext(ie, 0, NULL, 0)) {
++	    wps_build_wfa_ext(ie, 0, NULL, 0, 0)) {
+ 		wpabuf_free(ie);
+ 		return NULL;
+ 	}
+@@ -516,7 +516,7 @@ struct wpabuf * wps_build_probe_req_ie(u16 pw_id, struct wps_device_data *dev,
+ 	    wps_build_model_name(dev, ie) ||
+ 	    wps_build_model_number(dev, ie) ||
+ 	    wps_build_dev_name(dev, ie) ||
+-	    wps_build_wfa_ext(ie, req_type == WPS_REQ_ENROLLEE, NULL, 0) ||
++	    wps_build_wfa_ext(ie, req_type == WPS_REQ_ENROLLEE, NULL, 0, 0) ||
+ 	    wps_build_req_dev_type(dev, ie, num_req_dev_types, req_dev_types)
+ 	    ||
+ 	    wps_build_secondary_dev_type(dev, ie)
+diff --git a/src/wps/wps.h b/src/wps/wps.h
+index 2505d2d9f..129f27ab4 100644
+--- a/src/wps/wps.h
++++ b/src/wps/wps.h
+@@ -612,6 +612,12 @@ struct wps_context {
+ 	 */
+ 	int ap_setup_locked;
+ 
++	/**
++	 * multi_ap_backhaul_sta - Whether this is a Multi-AP backhaul STA
++	 * enrollee
++	 */
++	int multi_ap_backhaul_sta;
++
+ 	/**
+ 	 * uuid - Own UUID
+ 	 */
+diff --git a/src/wps/wps_attr_build.c b/src/wps/wps_attr_build.c
+index 770f5e90c..22b33e8c3 100644
+--- a/src/wps/wps_attr_build.c
++++ b/src/wps/wps_attr_build.c
+@@ -203,7 +203,8 @@ int wps_build_version(struct wpabuf *msg)
+ 
+ 
+ int wps_build_wfa_ext(struct wpabuf *msg, int req_to_enroll,
+-		      const u8 *auth_macs, size_t auth_macs_count)
++		      const u8 *auth_macs, size_t auth_macs_count,
++		      u8 multi_ap_subelem)
+ {
+ 	u8 *len;
+ 
+@@ -244,6 +245,13 @@ int wps_build_wfa_ext(struct wpabuf *msg, int req_to_enroll,
+ 				   MAC2STR(&auth_macs[i * ETH_ALEN]));
+ 	}
+ 
++	if (multi_ap_subelem) {
++		wpa_printf(MSG_DEBUG, "WPS:  * Multi-AP (0x%x)", multi_ap_subelem);
++		wpabuf_put_u8(msg, WFA_ELEM_MULTI_AP);
++		wpabuf_put_u8(msg, 1); /* length */
++		wpabuf_put_u8(msg, multi_ap_subelem);
++	}
++
+ 	WPA_PUT_BE16(len, (u8 *) wpabuf_put(msg, 0) - len - 2);
+ 
+ #ifdef CONFIG_WPS_TESTING
+diff --git a/src/wps/wps_common.c b/src/wps/wps_common.c
+index 2e3472177..2ea39e933 100644
+--- a/src/wps/wps_common.c
++++ b/src/wps/wps_common.c
+@@ -374,7 +374,7 @@ struct wpabuf * wps_get_oob_cred(struct wps_context *wps, int rf_band,
+ 	    (rf_band && wps_build_rf_bands_attr(plain, rf_band)) ||
+ 	    (channel && wps_build_ap_channel(plain, channel)) ||
+ 	    wps_build_mac_addr(plain, wps->dev.mac_addr) ||
+-	    wps_build_wfa_ext(plain, 0, NULL, 0)) {
++	    wps_build_wfa_ext(plain, 0, NULL, 0, 0)) {
+ 		os_free(data.new_psk);
+ 		wpabuf_clear_free(plain);
+ 		return NULL;
+@@ -421,7 +421,7 @@ struct wpabuf * wps_build_nfc_pw_token(u16 dev_pw_id,
+ 
+ 	if (wps_build_oob_dev_pw(data, dev_pw_id, pubkey,
+ 				 wpabuf_head(dev_pw), wpabuf_len(dev_pw)) ||
+-	    wps_build_wfa_ext(data, 0, NULL, 0)) {
++	    wps_build_wfa_ext(data, 0, NULL, 0, 0)) {
+ 		wpa_printf(MSG_ERROR, "WPS: Failed to build NFC password "
+ 			   "token");
+ 		wpabuf_clear_free(data);
+@@ -586,7 +586,7 @@ struct wpabuf * wps_build_wsc_ack(struct wps_data *wps)
+ 	    wps_build_msg_type(msg, WPS_WSC_ACK) ||
+ 	    wps_build_enrollee_nonce(wps, msg) ||
+ 	    wps_build_registrar_nonce(wps, msg) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -610,7 +610,7 @@ struct wpabuf * wps_build_wsc_nack(struct wps_data *wps)
+ 	    wps_build_enrollee_nonce(wps, msg) ||
+ 	    wps_build_registrar_nonce(wps, msg) ||
+ 	    wps_build_config_error(msg, wps->config_error) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -725,7 +725,7 @@ struct wpabuf * wps_build_nfc_handover_req(struct wps_context *ctx,
+ 	if (wps_build_oob_dev_pw(msg, DEV_PW_NFC_CONNECTION_HANDOVER,
+ 				 nfc_dh_pubkey, NULL, 0) ||
+ 	    wps_build_uuid_e(msg, ctx->uuid) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -808,7 +808,7 @@ struct wpabuf * wps_build_nfc_handover_sel(struct wps_context *ctx,
+ 	    wps_build_ssid(msg, ctx) ||
+ 	    wps_build_ap_freq(msg, freq) ||
+ 	    (bssid && wps_build_mac_addr(msg, bssid)) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -847,7 +847,7 @@ struct wpabuf * wps_build_nfc_handover_req_p2p(struct wps_context *ctx,
+ 	    wps_build_rf_bands(&ctx->dev, msg, 0) ||
+ 	    wps_build_serial_number(&ctx->dev, msg) ||
+ 	    wps_build_uuid_e(msg, ctx->uuid) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -899,7 +899,7 @@ struct wpabuf * wps_build_nfc_handover_sel_p2p(struct wps_context *ctx,
+ 	    wps_build_rf_bands(&ctx->dev, msg, 0) ||
+ 	    wps_build_serial_number(&ctx->dev, msg) ||
+ 	    wps_build_uuid_e(msg, ctx->uuid) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+diff --git a/src/wps/wps_defs.h b/src/wps/wps_defs.h
+index 301864da4..9fccb4eeb 100644
+--- a/src/wps/wps_defs.h
++++ b/src/wps/wps_defs.h
+@@ -152,7 +152,8 @@ enum {
+ 	WFA_ELEM_NETWORK_KEY_SHAREABLE = 0x02,
+ 	WFA_ELEM_REQUEST_TO_ENROLL = 0x03,
+ 	WFA_ELEM_SETTINGS_DELAY_TIME = 0x04,
+-	WFA_ELEM_REGISTRAR_CONFIGURATION_METHODS = 0x05
++	WFA_ELEM_REGISTRAR_CONFIGURATION_METHODS = 0x05,
++	WFA_ELEM_MULTI_AP = 0x06
+ };
+ 
+ /* Device Password ID */
+diff --git a/src/wps/wps_enrollee.c b/src/wps/wps_enrollee.c
+index 417507740..e175770f1 100644
+--- a/src/wps/wps_enrollee.c
++++ b/src/wps/wps_enrollee.c
+@@ -105,6 +105,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
+ {
+ 	struct wpabuf *msg;
+ 	u16 config_methods;
++	u8 multi_ap_backhaul_sta = 0;
+ 
+ 	if (random_get_bytes(wps->nonce_e, WPS_NONCE_LEN) < 0)
+ 		return NULL;
+@@ -134,6 +135,9 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
+ 				    WPS_CONFIG_PHY_PUSHBUTTON);
+ 	}
+ 
++	if (wps->wps->multi_ap_backhaul_sta)
++		multi_ap_backhaul_sta = MULTI_AP_BACKHAUL_STA;
++
+ 	if (wps_build_version(msg) ||
+ 	    wps_build_msg_type(msg, WPS_M1) ||
+ 	    wps_build_uuid_e(msg, wps->uuid_e) ||
+@@ -152,7 +156,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
+ 	    wps_build_dev_password_id(msg, wps->dev_pw_id) ||
+ 	    wps_build_config_error(msg, WPS_CFG_NO_ERROR) ||
+ 	    wps_build_os_version(&wps->wps->dev, msg) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, multi_ap_backhaul_sta) ||
+ 	    wps_build_vendor_ext_m1(&wps->wps->dev, msg)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+@@ -190,7 +194,7 @@ static struct wpabuf * wps_build_m3(struct wps_data *wps)
+ 	    wps_build_msg_type(msg, WPS_M3) ||
+ 	    wps_build_registrar_nonce(wps, msg) ||
+ 	    wps_build_e_hash(wps, msg) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
+ 	    wps_build_authenticator(wps, msg)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+@@ -223,7 +227,7 @@ static struct wpabuf * wps_build_m5(struct wps_data *wps)
+ 	    wps_build_e_snonce1(wps, plain) ||
+ 	    wps_build_key_wrap_auth(wps, plain) ||
+ 	    wps_build_encr_settings(wps, msg, plain) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
+ 	    wps_build_authenticator(wps, msg)) {
+ 		wpabuf_clear_free(plain);
+ 		wpabuf_free(msg);
+@@ -393,7 +397,7 @@ static struct wpabuf * wps_build_m7(struct wps_data *wps)
+ 	    (wps->wps->ap && wps_build_ap_settings(wps, plain)) ||
+ 	    wps_build_key_wrap_auth(wps, plain) ||
+ 	    wps_build_encr_settings(wps, msg, plain) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
+ 	    wps_build_authenticator(wps, msg)) {
+ 		wpabuf_clear_free(plain);
+ 		wpabuf_free(msg);
+@@ -430,7 +434,7 @@ static struct wpabuf * wps_build_wsc_done(struct wps_data *wps)
+ 	    wps_build_msg_type(msg, WPS_WSC_DONE) ||
+ 	    wps_build_enrollee_nonce(wps, msg) ||
+ 	    wps_build_registrar_nonce(wps, msg) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+diff --git a/src/wps/wps_er.c b/src/wps/wps_er.c
+index affd6a4af..06a8fdaf3 100644
+--- a/src/wps/wps_er.c
++++ b/src/wps/wps_er.c
+@@ -1530,7 +1530,7 @@ void wps_er_set_sel_reg(struct wps_er *er, int sel_reg, u16 dev_passwd_id,
+ 	    wps_er_build_selected_registrar(msg, sel_reg) ||
+ 	    wps_er_build_dev_password_id(msg, dev_passwd_id) ||
+ 	    wps_er_build_sel_reg_config_methods(msg, sel_reg_config_methods) ||
+-	    wps_build_wfa_ext(msg, 0, auth_macs, count) ||
++	    wps_build_wfa_ext(msg, 0, auth_macs, count, 0) ||
+ 	    wps_er_build_uuid_r(msg, er->wps->uuid)) {
+ 		wpabuf_free(msg);
+ 		return;
+@@ -2048,7 +2048,7 @@ struct wpabuf * wps_er_config_token_from_cred(struct wps_context *wps,
+ 	data.wps = wps;
+ 	data.use_cred = cred;
+ 	if (wps_build_cred(&data, ret) ||
+-	    wps_build_wfa_ext(ret, 0, NULL, 0)) {
++	    wps_build_wfa_ext(ret, 0, NULL, 0, 0)) {
+ 		wpabuf_free(ret);
+ 		return NULL;
+ 	}
+diff --git a/src/wps/wps_i.h b/src/wps/wps_i.h
+index fe0c60bd1..7972fc225 100644
+--- a/src/wps/wps_i.h
++++ b/src/wps/wps_i.h
+@@ -163,7 +163,8 @@ int wps_build_encr_settings(struct wps_data *wps, struct wpabuf *msg,
+ 			    struct wpabuf *plain);
+ int wps_build_version(struct wpabuf *msg);
+ int wps_build_wfa_ext(struct wpabuf *msg, int req_to_enroll,
+-		      const u8 *auth_macs, size_t auth_macs_count);
++		      const u8 *auth_macs, size_t auth_macs_count,
++		      u8 multi_ap_subelem);
+ int wps_build_msg_type(struct wpabuf *msg, enum wps_msg_type msg_type);
+ int wps_build_enrollee_nonce(struct wps_data *wps, struct wpabuf *msg);
+ int wps_build_registrar_nonce(struct wps_data *wps, struct wpabuf *msg);
+diff --git a/src/wps/wps_registrar.c b/src/wps/wps_registrar.c
+index 379925e3f..b5ac29bea 100644
+--- a/src/wps/wps_registrar.c
++++ b/src/wps/wps_registrar.c
+@@ -1281,7 +1281,7 @@ static int wps_set_ie(struct wps_registrar *reg)
+ 	    wps_build_sel_reg_config_methods(reg, beacon) ||
+ 	    wps_build_sel_pbc_reg_uuid_e(reg, beacon) ||
+ 	    (reg->dualband && wps_build_rf_bands(&reg->wps->dev, beacon, 0)) ||
+-	    wps_build_wfa_ext(beacon, 0, auth_macs, count) ||
++	    wps_build_wfa_ext(beacon, 0, auth_macs, count, 0) ||
+ 	    wps_build_vendor_ext(&reg->wps->dev, beacon)) {
+ 		wpabuf_free(beacon);
+ 		wpabuf_free(probe);
+@@ -1311,7 +1311,7 @@ static int wps_set_ie(struct wps_registrar *reg)
+ 	    wps_build_device_attrs(&reg->wps->dev, probe) ||
+ 	    wps_build_probe_config_methods(reg, probe) ||
+ 	    (reg->dualband && wps_build_rf_bands(&reg->wps->dev, probe, 0)) ||
+-	    wps_build_wfa_ext(probe, 0, auth_macs, count) ||
++	    wps_build_wfa_ext(probe, 0, auth_macs, count, 0) ||
+ 	    wps_build_vendor_ext(&reg->wps->dev, probe)) {
+ 		wpabuf_free(beacon);
+ 		wpabuf_free(probe);
+@@ -1845,7 +1845,7 @@ static struct wpabuf * wps_build_m2(struct wps_data *wps)
+ 	    wps_build_config_error(msg, WPS_CFG_NO_ERROR) ||
+ 	    wps_build_dev_password_id(msg, wps->dev_pw_id) ||
+ 	    wps_build_os_version(&wps->wps->dev, msg) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -1913,7 +1913,7 @@ static struct wpabuf * wps_build_m2d(struct wps_data *wps)
+ 	    wps_build_assoc_state(wps, msg) ||
+ 	    wps_build_config_error(msg, err) ||
+ 	    wps_build_os_version(&wps->wps->dev, msg) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+@@ -1949,7 +1949,7 @@ static struct wpabuf * wps_build_m4(struct wps_data *wps)
+ 	    wps_build_r_snonce1(wps, plain) ||
+ 	    wps_build_key_wrap_auth(wps, plain) ||
+ 	    wps_build_encr_settings(wps, msg, plain) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
+ 	    wps_build_authenticator(wps, msg)) {
+ 		wpabuf_clear_free(plain);
+ 		wpabuf_free(msg);
+@@ -1984,7 +1984,7 @@ static struct wpabuf * wps_build_m6(struct wps_data *wps)
+ 	    wps_build_r_snonce2(wps, plain) ||
+ 	    wps_build_key_wrap_auth(wps, plain) ||
+ 	    wps_build_encr_settings(wps, msg, plain) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
+ 	    wps_build_authenticator(wps, msg)) {
+ 		wpabuf_clear_free(plain);
+ 		wpabuf_free(msg);
+@@ -2021,7 +2021,7 @@ static struct wpabuf * wps_build_m8(struct wps_data *wps)
+ 	    (!wps->wps->ap && !wps->er && wps_build_ap_settings(wps, plain)) ||
+ 	    wps_build_key_wrap_auth(wps, plain) ||
+ 	    wps_build_encr_settings(wps, msg, plain) ||
+-	    wps_build_wfa_ext(msg, 0, NULL, 0) ||
++	    wps_build_wfa_ext(msg, 0, NULL, 0, 0) ||
+ 	    wps_build_authenticator(wps, msg)) {
+ 		wpabuf_clear_free(plain);
+ 		wpabuf_clear_free(msg);
+diff --git a/src/wps/wps_upnp.c b/src/wps/wps_upnp.c
+index 0c458c6ad..ca893a43c 100644
+--- a/src/wps/wps_upnp.c
++++ b/src/wps/wps_upnp.c
+@@ -599,7 +599,7 @@ static struct wpabuf * build_fake_wsc_ack(void)
+ 	wpabuf_put_be16(msg, ATTR_REGISTRAR_NONCE);
+ 	wpabuf_put_be16(msg, WPS_NONCE_LEN);
+ 	wpabuf_put(msg, WPS_NONCE_LEN);
+-	if (wps_build_wfa_ext(msg, 0, NULL, 0)) {
++	if (wps_build_wfa_ext(msg, 0, NULL, 0, 0)) {
+ 		wpabuf_free(msg);
+ 		return NULL;
+ 	}
+diff --git a/wpa_supplicant/config.c b/wpa_supplicant/config.c
+index 5bf68da06..10a585928 100644
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -4734,6 +4734,7 @@ static const struct global_parse_data global_fields[] = {
+ 	{ STR(config_methods), CFG_CHANGED_CONFIG_METHODS },
+ 	{ INT_RANGE(wps_cred_processing, 0, 2), 0 },
+ 	{ FUNC(wps_vendor_ext_m1), CFG_CHANGED_VENDOR_EXTENSION },
++	{ INT_RANGE(multi_ap_backhaul_sta, 0, 1), CFG_CHANGED_MULTI_AP_BACKHAUL_STA },
+ #endif /* CONFIG_WPS */
+ #ifdef CONFIG_P2P
+ 	{ FUNC(sec_device_type), CFG_CHANGED_SEC_DEVICE_TYPE },
+diff --git a/wpa_supplicant/config.h b/wpa_supplicant/config.h
+index 54a2e4172..89bf884e8 100644
+--- a/wpa_supplicant/config.h
++++ b/wpa_supplicant/config.h
+@@ -375,6 +375,7 @@ struct wpa_cred {
+ #define CFG_CHANGED_P2P_PASSPHRASE_LEN BIT(16)
+ #define CFG_CHANGED_SCHED_SCAN_PLANS BIT(17)
+ #define CFG_CHANGED_WOWLAN_TRIGGERS BIT(18)
++#define CFG_CHANGED_MULTI_AP_BACKHAUL_STA BIT(19)
+ 
+ /**
+  * struct wpa_config - wpa_supplicant configuration data
+@@ -769,6 +770,7 @@ struct wpa_config {
+ 	int p2p_optimize_listen_chan;
+ 
+ 	struct wpabuf *wps_vendor_ext_m1;
++	int multi_ap_backhaul_sta;
+ 
+ #define MAX_WPS_VENDOR_EXT 10
+ 	/**
+diff --git a/wpa_supplicant/config_file.c b/wpa_supplicant/config_file.c
+index d4d9551ab..4b835b4fd 100644
+--- a/wpa_supplicant/config_file.c
++++ b/wpa_supplicant/config_file.c
+@@ -1185,6 +1185,10 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
+ 			fprintf(f, "\n");
+ 		}
+ 	}
++
++	if (config->multi_ap_backhaul_sta)
++		fprintf(f, "multi_ap_backhaul_sta=%d\n", config->multi_ap_backhaul_sta);
++
+ #endif /* CONFIG_WPS */
+ #ifdef CONFIG_P2P
+ 	{
+diff --git a/wpa_supplicant/wpa_supplicant.conf b/wpa_supplicant/wpa_supplicant.conf
+index 35526045d..d6e6fd827 100644
+--- a/wpa_supplicant/wpa_supplicant.conf
++++ b/wpa_supplicant/wpa_supplicant.conf
+@@ -289,6 +289,11 @@ fast_reauth=1
+ # The vendor attribute contents to be added in M1 (hex string)
+ #wps_vendor_ext_m1=000137100100020001
+ 
++# Multi-AP STA config
++# When set to 1, the Multi-AP vendor extension is added to WPS M1 and the
++# Multi-AP IE is sent to the driver for inclusion in association request frames.
++#multi_ap_backhaul_sta=1
++
+ # NFC password token for WPS
+ # These parameters can be used to configure a fixed NFC password token for the
+ # station. This can be generated, e.g., with nfc_pw_token. When these
+diff --git a/wpa_supplicant/wps_supplicant.c b/wpa_supplicant/wps_supplicant.c
+index 1a2677b8e..de3943912 100644
+--- a/wpa_supplicant/wps_supplicant.c
++++ b/wpa_supplicant/wps_supplicant.c
+@@ -473,6 +473,11 @@ static int wpa_supplicant_wps_cred(void *ctx,
+ 	wpa_config_set_network_defaults(ssid);
+ 	ssid->wps_run = wpa_s->wps_run;
+ 
++	if (wpa_s->conf->multi_ap_backhaul_sta)
++		ssid->multi_ap_backhaul_sta = 1;
++	else
++		ssid->multi_ap_backhaul_sta = 0;
++
+ 	os_free(ssid->ssid);
+ 	ssid->ssid = os_malloc(cred->ssid_len);
+ 	if (ssid->ssid) {
+@@ -1181,6 +1186,8 @@ int wpas_wps_start_pbc(struct wpa_supplicant *wpa_s, const u8 *bssid,
+ 		return -1;
+ 	if (wpa_s->wps_fragment_size)
+ 		ssid->eap.fragment_size = wpa_s->wps_fragment_size;
++	if (wpa_s->conf->multi_ap_backhaul_sta)
++		ssid->multi_ap_backhaul_sta = 1;
+ 	wpa_supplicant_wps_event(wpa_s, WPS_EV_PBC_ACTIVE, NULL);
+ 	eloop_register_timeout(WPS_PBC_WALK_TIME, 0, wpas_wps_timeout,
+ 			       wpa_s, NULL);
+@@ -1527,7 +1534,6 @@ static void wpas_wps_set_vendor_ext_m1(struct wpa_supplicant *wpa_s,
+ 	}
+ }
+ 
+-
+ int wpas_wps_init(struct wpa_supplicant *wpa_s)
+ {
+ 	struct wps_context *wps;
+@@ -1569,6 +1575,8 @@ int wpas_wps_init(struct wpa_supplicant *wpa_s)
+ 
+ 	wpas_wps_set_vendor_ext_m1(wpa_s, wps);
+ 
++	wps->multi_ap_backhaul_sta = wpa_s->conf->multi_ap_backhaul_sta;
++
+ 	wps->dev.os_version = WPA_GET_BE32(wpa_s->conf->os_version);
+ 	modes = wpa_s->hw.modes;
+ 	if (modes) {
+@@ -2205,6 +2213,9 @@ void wpas_wps_update_config(struct wpa_supplicant *wpa_s)
+ 	if (wpa_s->conf->changed_parameters & CFG_CHANGED_VENDOR_EXTENSION)
+ 		wpas_wps_set_vendor_ext_m1(wpa_s, wps);
+ 
++	if (wpa_s->conf->changed_parameters & CFG_CHANGED_MULTI_AP_BACKHAUL_STA)
++		wps->multi_ap_backhaul_sta = wpa_s->conf->multi_ap_backhaul_sta;
++
+ 	if (wpa_s->conf->changed_parameters & CFG_CHANGED_OS_VERSION)
+ 		wps->dev.os_version = WPA_GET_BE32(wpa_s->conf->os_version);
+ 
+-- 
+2.19.2
+
