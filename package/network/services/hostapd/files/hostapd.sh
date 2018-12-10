@@ -212,6 +212,8 @@ hostapd_common_add_bss_config() {
 
 	config_add_string wpa_psk_file
 
+	config_add_int multi_ap
+
 	config_add_boolean wps_pushbutton wps_label ext_registrar wps_pbc_in_m1
 	config_add_int wps_ap_setup_locked wps_independent
 	config_add_string wps_device_type wps_device_name wps_manufacturer wps_pin
@@ -261,7 +263,8 @@ hostapd_set_bss_options() {
 		macfilter ssid utf8_ssid wmm uapsd hidden short_preamble rsn_preauth \
 		iapp_interface eapol_version dynamic_vlan ieee80211w nasid \
 		acct_server acct_secret acct_port acct_interval \
-		bss_load_update_period chan_util_avg_period sae_require_mfp
+		bss_load_update_period chan_util_avg_period sae_require_mfp \
+		multi_ap
 
 	set_default isolate 0
 	set_default maxassoc 0
@@ -278,7 +281,8 @@ hostapd_set_bss_options() {
 	set_default bss_load_update_period 60
 	set_default chan_util_avg_period 600
 	set_default utf8_ssid 1
-	
+	set_default multi_ap 0
+
 	append bss_conf "ctrl_interface=/var/run/hostapd"
 	if [ "$isolate" -gt 0 ]; then
 		append bss_conf "ap_isolate=$isolate" "$N"
@@ -298,6 +302,7 @@ hostapd_set_bss_options() {
 	append bss_conf "ignore_broadcast_ssid=$hidden" "$N"
 	append bss_conf "uapsd_advertisement_enabled=$uapsd" "$N"
 	append bss_conf "utf8_ssid=$utf8_ssid" "$N"
+	append bss_conf "multi_ap=$multi_ap" "$N"
 
 	[ "$tdls_prohibit" -gt 0 ] && append bss_conf "tdls_prohibit=$tdls_prohibit" "$N"
 
@@ -419,6 +424,9 @@ hostapd_set_bss_options() {
 	config_methods=
 	[ "$wps_pushbutton" -gt 0 ] && append config_methods push_button
 	[ "$wps_label" -gt 0 ] && append config_methods label
+
+	# WPS not possible on Multi-AP backhaul-only SSID
+	[ "$multi_ap" = 1 ] && wps_possible=
 
 	[ -n "$wps_possible" -a -n "$config_methods" ] && {
 		set_default ext_registrar 0
@@ -640,7 +648,7 @@ wpa_supplicant_prepare_interface() {
 
 	_wpa_supplicant_common "$1"
 
-	json_get_vars mode wds
+	json_get_vars mode wds multi_ap
 
 	[ -n "$network_bridge" ] && {
 		fail=
@@ -649,7 +657,7 @@ wpa_supplicant_prepare_interface() {
 				fail=1
 			;;
 			sta)
-				[ "$wds" = 1 ] || fail=1
+				[ "$wds" = 1 -o "$multi_ap" = 1 ] || fail=1
 			;;
 		esac
 
@@ -716,9 +724,11 @@ wpa_supplicant_add_network() {
 	json_get_vars \
 		ssid bssid key \
 		basic_rate mcast_rate \
-		ieee80211w ieee80211r
+		ieee80211w ieee80211r \
+		multi_ap
 
 	set_default ieee80211r 0
+	set_default multi_ap 0
 
 	local key_mgmt='NONE'
 	local enc_str=
@@ -751,6 +761,8 @@ wpa_supplicant_add_network() {
 	}
 
 	[ "$_w_mode" = "adhoc" -o "$_w_mode" = "mesh" ] && append network_data "$_w_modestr" "$N$T"
+
+	[ "$multi_ap" = 1 -a "$_w_mode" = "sta" ] && append network_data "multi_ap_backhaul_sta=1" "$N$T"
 
 	case "$auth_type" in
 		none) ;;
