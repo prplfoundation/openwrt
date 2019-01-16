@@ -217,6 +217,7 @@ hostapd_common_add_bss_config() {
 	config_add_boolean wps_pushbutton wps_label ext_registrar wps_pbc_in_m1
 	config_add_int wps_ap_setup_locked wps_independent
 	config_add_string wps_device_type wps_device_name wps_manufacturer wps_pin
+	config_add_string multi_ap_backhaul_ssid multi_ap_backhaul_key
 
 	config_add_boolean ieee80211v wnm_sleep_mode bss_transition
 	config_add_int time_advertisement
@@ -264,7 +265,7 @@ hostapd_set_bss_options() {
 		iapp_interface eapol_version dynamic_vlan ieee80211w nasid \
 		acct_server acct_secret acct_port acct_interval \
 		bss_load_update_period chan_util_avg_period sae_require_mfp \
-		multi_ap
+		multi_ap multi_ap_backhaul_ssid multi_ap_backhaul_key
 
 	set_default isolate 0
 	set_default maxassoc 0
@@ -450,6 +451,19 @@ hostapd_set_bss_options() {
 		append bss_conf "wps_independent=$wps_independent" "$N"
 		[ -n "$wps_ap_setup_locked" ] && append bss_conf "ap_setup_locked=$wps_ap_setup_locked" "$N"
 		[ "$wps_pbc_in_m1" -gt 0 ] && append bss_conf "pbc_in_m1=$wps_pbc_in_m1" "$N"
+		[ "$multi_ap" -gt 0 ] && [ -n "$multi_ap_backhaul_ssid" ] && {
+			append bss_conf "multi_ap_backhaul_ssid=\"$multi_ap_backhaul_ssid\"" "$N"
+			if [ -z "$multi_ap_backhaul_key" ]; then
+				:
+			elif [ ${#multi_ap_backhaul_key} -lt 8 ]; then
+				wireless_setup_vif_failed INVALID_WPA_PSK
+				return 1
+			elif [ ${#multi_ap_backhaul_key} -eq 64 ]; then
+				append bss_conf "multi_ap_backhaul_wpa_psk=$multi_ap_backhaul_key" "$N"
+			else
+				append bss_conf "multi_ap_backhaul_wpa_passphrase=$multi_ap_backhaul_key" "$N"
+			fi
+		}
 	}
 
 	append bss_conf "ssid=$ssid" "$N"
@@ -683,6 +697,12 @@ wpa_supplicant_prepare_interface() {
 		country_str="country=$country"
 	}
 
+	multiap_flag_file="${_config}.is_multiap"
+	if [ "$multi_ap" = "1" ]; then
+		touch "$multiap_flag_file"
+	else
+		[ -e "$multiap_flag_file" ] && rm "$multiap_flag_file"
+	fi
 	wpa_supplicant_teardown_interface "$ifname"
 	cat > "$_config" <<EOF
 $ap_scan

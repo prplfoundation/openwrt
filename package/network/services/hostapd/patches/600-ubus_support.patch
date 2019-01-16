@@ -134,7 +134,7 @@
  	if (res == HOSTAPD_ACL_PENDING)
  		return;
  
-@@ -3285,12 +3298,12 @@ void fils_hlp_timeout(void *eloop_ctx, v
+@@ -3287,12 +3300,12 @@ void fils_hlp_timeout(void *eloop_ctx, v
  
  static void handle_assoc(struct hostapd_data *hapd,
  			 const struct ieee80211_mgmt *mgmt, size_t len,
@@ -149,7 +149,7 @@
  	struct sta_info *sta;
  	u8 *tmp = NULL;
  	struct hostapd_sta_wpa_psk_short *psk = NULL;
-@@ -3299,6 +3312,11 @@ static void handle_assoc(struct hostapd_
+@@ -3301,6 +3314,11 @@ static void handle_assoc(struct hostapd_
  #ifdef CONFIG_FILS
  	int delay_assoc = 0;
  #endif /* CONFIG_FILS */
@@ -161,7 +161,7 @@
  
  	if (len < IEEE80211_HDRLEN + (reassoc ? sizeof(mgmt->u.reassoc_req) :
  				      sizeof(mgmt->u.assoc_req))) {
-@@ -3470,6 +3488,14 @@ static void handle_assoc(struct hostapd_
+@@ -3472,6 +3490,14 @@ static void handle_assoc(struct hostapd_
  	}
  #endif /* CONFIG_MBO */
  
@@ -176,7 +176,7 @@
  	/*
  	 * sta->capability is used in check_assoc_ies() for RRM enabled
  	 * capability element.
-@@ -3683,6 +3709,7 @@ static void handle_disassoc(struct hosta
+@@ -3685,6 +3711,7 @@ static void handle_disassoc(struct hosta
  	wpa_printf(MSG_DEBUG, "disassocation: STA=" MACSTR " reason_code=%d",
  		   MAC2STR(mgmt->sa),
  		   le_to_host16(mgmt->u.disassoc.reason_code));
@@ -184,7 +184,7 @@
  
  	sta = ap_get_sta(hapd, mgmt->sa);
  	if (sta == NULL) {
-@@ -3748,6 +3775,8 @@ static void handle_deauth(struct hostapd
+@@ -3750,6 +3777,8 @@ static void handle_deauth(struct hostapd
  		" reason_code=%d",
  		MAC2STR(mgmt->sa), le_to_host16(mgmt->u.deauth.reason_code));
  
@@ -193,7 +193,7 @@
  	sta = ap_get_sta(hapd, mgmt->sa);
  	if (sta == NULL) {
  		wpa_msg(hapd->msg_ctx, MSG_DEBUG, "Station " MACSTR " trying "
-@@ -4075,7 +4104,7 @@ int ieee802_11_mgmt(struct hostapd_data
+@@ -4077,7 +4106,7 @@ int ieee802_11_mgmt(struct hostapd_data
  
  
  	if (stype == WLAN_FC_STYPE_PROBE_REQ) {
@@ -202,7 +202,7 @@
  		return 1;
  	}
  
-@@ -4095,17 +4124,17 @@ int ieee802_11_mgmt(struct hostapd_data
+@@ -4097,17 +4126,17 @@ int ieee802_11_mgmt(struct hostapd_data
  	switch (stype) {
  	case WLAN_FC_STYPE_AUTH:
  		wpa_printf(MSG_DEBUG, "mgmt::auth");
