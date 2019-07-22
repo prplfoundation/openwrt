@@ -1,0 +1,33 @@
+From a93de4b9a79ac37f8c2d0b2e7197a98902ad3fef Mon Sep 17 00:00:00 2001
+From: abrahaal <alexander.abraham@intel.com>
+Date: Wed, 31 Oct 2018 12:54:16 +0530
+Subject: [PATCH] Allow UBUSD to read ACL files in non-root mode.
+
+UBUS ACL files are designed to be modified by root/administrator by default even if the ubusd
+has to be run as non-root in the system. So the daemon checks explicitly the ownership of
+ACL files to be 'root' user before trusting it.
+
+For SDL complaint if we have to run ubusd as non-root, the ACL files should be having atleast
+a read access to ubusd user. This require read mask to set for all users like 444 on ACL files.
+In this case any users can read ACL settings which will be a security concern. To avoid that,
+we can give ownership of ACL files to ubusd user itself and change the mask to 400 (read-only).
+
+The code change is to check if ownership is root, then continue or if ownership is ubusd user,
+then check additionally if mask is 400 and continue.
+--- a/ubusd_acl.c
++++ b/ubusd_acl.c
+@@ -400,8 +400,12 @@ ubusd_acl_load(void)
+ 			continue;
+ 
+ 		if (st.st_uid || st.st_gid) {
+-			syslog(LOG_ERR, "%s has wrong owner\n", gl.gl_pathv[j]);
+-			continue;
++			/* If not root, then we check if ACL files are owned by current running user only
++			   and available as read-only mode */
++			if (st.st_mode & (S_IWUSR | S_IEXEC | S_IRWXG | S_IRWXO)) {
++				syslog(LOG_ERR, "%s has wrong owner or permissions\n", gl.gl_pathv[j]);
++				continue;
++			}
+ 		}
+ 		if (st.st_mode & (S_IWOTH | S_IWGRP | S_IXOTH)) {
+ 			syslog(LOG_ERR, "%s has wrong permissions\n", gl.gl_pathv[j]);
