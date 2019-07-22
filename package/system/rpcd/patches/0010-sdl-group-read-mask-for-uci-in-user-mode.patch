@@ -1,0 +1,93 @@
+From 336688c13e7b8b7ec750c8e5c880a15656bc77a0 Dec 11 16:36:46 2018
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Tue, 11 Dec 2018 16:36:46 +0530
+Subject: [PATCH] SDL - RPCD to add UCI group RO mask in non-root mode
+
+SDL: rpcd's default mask is rw only to user (umask 0077). If we have a system
+with all daemons and start scripts runs as different users, then the UCI file
+written by rpcd will not be able to read by other users. Here we add atleast
+read mask to the group so that UCI can be read by a user who have same group
+access.
+
+--- a/include/rpcd/uci.h
++++ b/include/rpcd/uci.h
+@@ -36,6 +36,10 @@
+ #define RPC_SNAPSHOT_DELTA	RPC_UCI_DIR_PREFIX "/snapshot-delta/"
+ #define RPC_UCI_DIR		"/etc/config/"
+ #define RPC_APPLY_TIMEOUT	60
++#define RPC_UMASK		0077
++#define RPC_UMASK_USER		0027
++
++extern uid_t rpcd_uid;
+ 
+ int rpc_uci_api_init(struct ubus_context *ctx);
+ 
+--- a/main.c
++++ b/main.c
+@@ -31,6 +31,7 @@
+ 
+ static struct ubus_context *ctx;
+ static bool respawn = false;
++uid_t rpcd_uid = 0;
+ 
+ static void
+ handle_signal(int sig)
+@@ -74,10 +75,12 @@ int main(int argc, char **argv)
+ 		}
+ 	}
+ 
++	rpcd_uid = getuid();
++
+ 	if (stat(RPC_UCI_DIR_PREFIX, &s))
+ 		mkdir(RPC_UCI_DIR_PREFIX, 0700);
+ 
+-	umask(0077);
++	umask(RPC_UMASK);
+ 
+ 	signal(SIGPIPE, SIG_IGN);
+ 	signal(SIGHUP,  handle_signal);
+--- a/uci.c
++++ b/uci.c
+@@ -18,6 +18,7 @@
+ 
+ #include <libgen.h>
+ #include <glob.h>
++#include <sys/stat.h>
+ 
+ #include <libubox/blobmsg.h>
+ #include <libubox/blobmsg_json.h>
+@@ -1123,6 +1124,7 @@ rpc_uci_revert_commit(struct ubus_contex
+ 	struct blob_attr *tb[__RPC_C_MAX];
+ 	struct uci_package *p = NULL;
+ 	struct uci_ptr ptr = { 0 };
++	mode_t prev_mode = RPC_UMASK;
+ 
+ 	if (apply_sid[0])
+ 		return UBUS_STATUS_PERMISSION_DENIED;
+@@ -1142,7 +1144,11 @@ rpc_uci_revert_commit(struct ubus_contex
+ 	{
+ 		if (!uci_load(cursor, ptr.package, &p))
+ 		{
++			if (rpcd_uid)
++				prev_mode = umask(RPC_UMASK_USER);
+ 			uci_commit(cursor, &p, false);
++			if (rpcd_uid)
++				(void) umask(prev_mode);
+ 			uci_unload(cursor, p);
+ 			rpc_uci_trigger_event(ctx, blobmsg_get_string(tb[RPC_C_CONFIG]));
+ 		}
+@@ -1239,9 +1245,14 @@ static int
+ rpc_uci_apply_config(struct ubus_context *ctx, char *config)
+ {
+ 	struct uci_package *p = NULL;
++	mode_t prev_mode = RPC_UMASK;
+ 
+ 	if (!uci_load(cursor, config, &p)) {
++		if (rpcd_uid)
++			prev_mode = umask(RPC_UMASK_USER);
+ 		uci_commit(cursor, &p, false);
++		if (rpcd_uid)
++			(void) umask(prev_mode);
+ 		uci_unload(cursor, p);
+ 	}
+ 	rpc_uci_trigger_event(ctx, config);
