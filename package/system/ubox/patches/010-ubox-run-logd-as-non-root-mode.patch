@@ -1,0 +1,47 @@
+From 2462943cd8b3b7a153dd333748c163ea8beb9cc2 Mon Sep 17 00:00:00 2001
+From: Jyoti Kumari <jyoti.kumari@intel.com>
+Date: Tue, 30 Oct 2018 12:31:46 +0530
+Subject: run logd as non root mode with optional argument -U <user>
+
+--- a/log/logd.c	2018-10-30 10:59:50.080480015 +0530
++++ b/log/logd.c	2018-10-30 11:02:43.769773993 +0530
+@@ -23,7 +23,7 @@
+ #include <libubox/list.h>
+ #include <libubox/ustream.h>
+ #include <libubus.h>
+-
++#include <pwd.h>
+ #include "syslog.h"
+ 
+ int debug = 0;
+@@ -212,21 +212,29 @@
+ main(int argc, char **argv)
+ {
+ 	int ch, log_size = 16;
++	struct passwd *p = NULL;
+ 
+ 	signal(SIGPIPE, SIG_IGN);
+-	while ((ch = getopt(argc, argv, "S:")) != -1) {
++	while ((ch = getopt(argc, argv, "S:U:")) != -1) {
+ 		switch (ch) {
+ 		case 'S':
+ 			log_size = atoi(optarg);
+ 			if (log_size < 1)
+ 				log_size = 16;
+ 			break;
++		case 'U':
++			p = getpwnam(optarg);
++			break;
+ 		}
+ 	}
+ 	log_size *= 1024;
+ 
+ 	uloop_init();
+ 	log_init(log_size);
++	if (p) {
++		setuid(p->pw_uid);
++		setgid(p->pw_gid);
++	}
+ 	conn.cb = ubus_connect_handler;
+ 	ubus_auto_connect(&conn);
+ 	uloop_run();
