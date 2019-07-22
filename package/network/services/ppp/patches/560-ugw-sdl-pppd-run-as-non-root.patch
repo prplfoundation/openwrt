@@ -1,0 +1,39 @@
+From 98c0f1f6dfa372f1e788af011033add4603e3c17 Mon Sep 17 00:00:00 2001
+From: abrahaal <alexander.abraham@intel.com>
+Date: Tue, 18 Sep 2018 10:46:47 +0530
+Subject: [PATCH] Allow pppd to run as non-root with capability checks.
+
+pppd daemon may be executed by a network manager daemon such as netifd with necessary ambient
+capability sets (inherited from process manager). This way we can make sure that it may still
+run with privileges in non-root mode. So add additional check on such required capability and
+proceed to run if success.
+
+--- a/pppd/main.c
++++ b/pppd/main.c
+@@ -91,6 +91,8 @@
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+ #include <sys/sysinfo.h>
++#include <sys/prctl.h>
++#include <sys/capability.h>
+ 
+ #include "pppd.h"
+ #include "magic.h"
+@@ -342,7 +344,7 @@ main(argc, argv)
+     umask(umask(0777) | 022);
+ 
+     uid = getuid();
+-    privileged = uid == 0;
++    privileged = uid == 0 || (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, CAP_NET_ADMIN, 0, 0) > 0);
+     slprintf(numbuf, sizeof(numbuf), "%d", uid);
+     script_setenv("ORIG_UID", numbuf, 0);
+ 
+@@ -390,7 +392,7 @@ main(argc, argv)
+     /*
+      * Check that we are running as root.
+      */
+-    if (geteuid() != 0) {
++    if ((geteuid() != 0) && !privileged) {
+ 	option_error("must be root to run %s, since it is not setuid-root",
+ 		     argv[0]);
+ 	exit(EXIT_NOT_ROOT);
