@@ -1,0 +1,120 @@
+From a8f9e13067ce7023b5e01d62fd57eba9060508fa Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Fri, 12 Apr 2019 17:53:02 +0530
+Subject: [PATCH] Run daemon in non-root mode within jail
+
+Index: procd-2019-05-30-ade00ca5/jail/jail.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/jail/jail.c
++++ procd-2019-05-30-ade00ca5/jail/jail.c
+@@ -28,6 +28,9 @@
+ #include <signal.h>
+ #include <sys/types.h>
+ #include <dirent.h>
++#include <grp.h>
++#include <pwd.h>
++#include <errno.h>
+ 
+ #include "capabilities.h"
+ #include "elf.h"
+@@ -38,7 +41,7 @@
+ #include <libubox/uloop.h>
+ 
+ #define STACK_SIZE	(1024 * 1024)
+-#define OPT_ARGS	"L:S:C:n:h:r:w:d:psuloc"
++#define OPT_ARGS	"L:S:C:U:G:n:h:r:w:d:psuloc"
+ 
+ static struct {
+ 	char *name;
+@@ -52,6 +55,8 @@ static struct {
+ 	int procfs;
+ 	int ronly;
+ 	int sysfs;
++	uid_t uid;
++	gid_t gid;
+ } opts;
+ 
+ extern int pivot_root(const char *new_root, const char *put_old);
+@@ -242,7 +247,9 @@ and will only drop capabilities/apply se
+ 
+ static int exec_jail(void *_notused)
+ {
+-	if (opts.capabilities && drop_capabilities(opts.capabilities, NULL, 0, NULL))
++	uint64_t usercaps = 0LLU;
++
++	if (opts.capabilities && drop_capabilities(opts.capabilities, &usercaps, opts.uid, NULL))
+ 		exit(EXIT_FAILURE);
+ 
+ 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+@@ -265,6 +272,18 @@ static int exec_jail(void *_notused)
+ 	if (!envp)
+ 		exit(EXIT_FAILURE);
+ 
++	if (opts.gid && setgid(opts.gid)) {
++		ERROR("failed to set group id %d: %d (%m)\n", opts.gid, errno);
++		exit(127);
++	}
++	if (opts.uid && setuid(opts.uid)) {
++		ERROR("failed to set user id %d: %d (%m)\n", opts.uid, errno);
++		exit(127);
++	}
++	if (opts.capabilities || opts.uid) {
++		user_capabilities(usercaps, opts.uid);
++	}
++
+ 	INFO("exec-ing %s\n", *opts.jail_argv);
+ 	execve(*opts.jail_argv, opts.jail_argv, envp);
+ 	/* we get there only if execve fails */
+@@ -391,6 +410,14 @@ int main(int argc, char **argv)
+ 			opts.namespace = 1;
+ 			add_mount(log, 0, -1);
+ 			break;
++		case 'U':
++			if (atoi(optarg) > 0)
++				opts.uid = atoi(optarg);
++			break;
++		case 'G':
++			if (atoi(optarg) > 0)
++				opts.gid = atoi(optarg);
++			break;
+ 		}
+ 	}
+ 
+Index: procd-2019-05-30-ade00ca5/service/instance.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/service/instance.c
++++ procd-2019-05-30-ade00ca5/service/instance.c
+@@ -211,7 +211,10 @@ jail_run(struct service_instance *in, ch
+ 	struct blobmsg_list_node *var;
+ 	static char env_var[MAX_LEN] = "";
+ 	static char env_path[MAX_LEN];
++	static char uid[MAX_LEN];
++	static char gid[MAX_LEN];
+ 	struct jail *jail = &in->jail;
++	struct passwd *p;
+ 	int argc = 0;
+ 
+ 	argv[argc++] = "/sbin/ujail";
+@@ -274,6 +277,22 @@ jail_run(struct service_instance *in, ch
+ 		argv[argc++] = (char *) blobmsg_name(var->data);
+ 	}
+ 
++	if (in->uid) {
++		if ((p = getpwuid(in->uid)) == NULL)
++			exit(EXIT_FAILURE);
++		if (initgroups(p->pw_name, in->gr_gid) != 0)
++			exit(EXIT_FAILURE);
++	}
++
++	snprintf(uid, sizeof(uid), "%u", in->uid);
++	snprintf(gid, sizeof(gid), "%u", in->gr_gid);
++
++	argv[argc++] = "-U";
++	argv[argc++] = (char *)uid;
++
++	argv[argc++] = "-G";
++	argv[argc++] = (char *)gid;
++
+ 	argv[argc++] = "--";
+ 
+ 	return argc;

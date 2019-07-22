@@ -1,0 +1,187 @@
+From 2ed8442591adc751f4db7eded9cf4cc4ea2071e6 Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Fri, 12 Apr 2019 17:53:34 +0530
+Subject: [PATCH] Configure pid in CGroups sliced tasks file.
+
+Procd to support adding process to a pre-defined CGroup slices.
+Also helps creating new CGroup slice per process with new settings.
+Extended capability json file to add cap.groups table.
+
+Re-used capability json file to add a process under pre-defined CGroup slices.
+This requires pre-defined slices under CGroupsv1/v2 such as
+/sys/fs/cgroup/cpu/{high,low}, /sys/fs/cgroup/memory/{high,medium,low} etc.
+with pre-defined settings. Procd just adds process ID (pid) to tasks file under
+a slice as mentioned via capability Json file. The feature also helps creating
+new CGroup slice per process with new settings.
+Example to add a process in pre-defined slice:
+{
+  "cap.cgroups": {
+	"cpu/high": [],
+	"memory/low": [],
+	"blkio/default: []"
+  }
+}
+
+Example to add new slice with settings:
+{
+  "cap.cgroups": {
+	"cpu": [
+		"cpu.shares=120"
+	],
+	"memory": [
+		"memory.limit_in_bytes=320000"
+		"memory.oom_control=1"
+	]
+  }
+}
+Above settings adds new slice as below and update the attributes.
+	/sys/fs/cgroup/cpu/sys_<pid>/cpu.shares=120
+	/sys/fs/cgroup/memory/sys_<pid>/memory.limit_in_bytes=320000
+	/sys/fs/cgroup/memory/sys_<pid>/memory.oom_control=1
+This also enables notify_on_release setting. Needs external release_agent to
+remove unused slices.
+--- a/jail/capabilities.c
++++ b/jail/capabilities.c
+@@ -20,11 +20,15 @@
+ #include <libubox/blobmsg_json.h>
+ #include <grp.h>
+ #include <limits.h>
++#include <sys/stat.h>
++#include <sys/types.h>
+ 
+ #include "log.h"
+ #include "../capabilities-names.h"
+ #include "capabilities.h"
+ 
++#define CGPATH "/sys/fs/cgroup"
++
+ extern int capset(cap_user_header_t header, cap_user_data_t data);
+ 
+ static int find_capabilities(const char *name)
+@@ -38,6 +42,92 @@ static int find_capabilities(const char
+ 	return -1;
+ }
+ 
++static void apply_cgroups(struct blob_attr *tb)
++{
++	char cgpath[PATH_MAX];
++	struct blob_attr *cur, *tcur;
++	unsigned int rem, trem;
++	pid_t pid;
++	bool flag;
++	FILE *fp;
++	const char *hname;
++	char *name, *p, *v;
++
++	pid = getpid();
++
++	blobmsg_for_each_attr(cur, tb, rem) {
++		hname = blobmsg_name(cur);
++		if (!hname)
++			continue;
++
++		snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/tasks", hname);
++		if (access(cgpath, W_OK) != 0)
++			continue;
++
++		if (!blobmsg_data_len(cur)) {
++			if ((fp = fopen(cgpath, "a")) != NULL) {
++				fprintf(fp, "%d\n", pid);
++				fclose(fp);
++			}
++			continue;
++		}
++
++		snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/memory.use_hierarchy", hname);
++		if ((fp = fopen(cgpath, "w")) != NULL) {
++			fprintf(fp, "1");
++			fclose(fp);
++		}
++
++		snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/sys_%d", hname, pid);
++		(void) mkdir(cgpath, 0700);
++
++		flag = 0;
++		blobmsg_for_each_attr(tcur, cur, trem) {
++			name = blobmsg_get_string(tcur);
++			if (!name)
++				continue;
++
++			p = name;
++			v = NULL;
++			while (*p != '\0') {
++				if (*p++ == '=') {
++					*(p - 1) = '\0';
++					v = p;
++					break;
++				}
++			}
++			if (!v)
++				continue;
++
++			snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/%s", hname, name);
++			if (access(cgpath, W_OK) != 0)
++				continue;
++
++			snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/sys_%d/%s", hname, pid, name);
++			if ((fp = fopen(cgpath, "w")) != NULL) {
++				flag = 1;
++				fprintf(fp, "%s\n", v);
++				fclose(fp);
++			}
++		}
++		if (flag) {
++			snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/sys_%d/notify_on_release", hname, pid);
++			if ((fp = fopen(cgpath, "a")) != NULL) {
++				fprintf(fp, "1");
++				fclose(fp);
++			}
++			snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/sys_%d/tasks", hname, pid);
++			if ((fp = fopen(cgpath, "a")) != NULL) {
++				fprintf(fp, "%d\n", pid);
++				fclose(fp);
++			}
++		} else {
++			snprintf(cgpath, sizeof(cgpath), CGPATH"/%s/sys_%d", hname, pid);
++			(void) rmdir(cgpath);
++		}
++	}
++}
++
+ int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid, gid_t *gid)
+ {
+ 	struct group *g;
+@@ -48,12 +138,14 @@ int drop_capabilities(const char *file,
+ 		CAP_KEEP,
+ 		CAP_DROP,
+ 		CAP_GRPS,
++		CAP_CGRP,
+ 		__CAP_MAX
+ 	};
+ 	static const struct blobmsg_policy policy[__CAP_MAX] = {
+ 		[CAP_KEEP] = { .name = "cap.keep", .type = BLOBMSG_TYPE_ARRAY },
+ 		[CAP_DROP] = { .name = "cap.drop", .type = BLOBMSG_TYPE_ARRAY },
+ 		[CAP_GRPS] = { .name = "cap.groups", .type = BLOBMSG_TYPE_ARRAY },
++		[CAP_CGRP] = { .name = "cap.cgroups", .type = BLOBMSG_TYPE_TABLE },
+ 	};
+ 	struct blob_buf b = { 0 };
+ 	struct blob_attr *tb[__CAP_MAX];
+@@ -75,7 +167,7 @@ int drop_capabilities(const char *file,
+ 	}
+ 
+ 	blobmsg_parse(policy, __CAP_MAX, tb, blob_data(b.head), blob_len(b.head));
+-	if (!tb[CAP_KEEP] && !tb[CAP_DROP]) {
++	if (!tb[CAP_KEEP] && !tb[CAP_DROP] && !tb[CAP_CGRP]) {
+ 		if (tb[CAP_GRPS])
+ 			grp_flag = 1;
+ 		else {
+@@ -84,6 +176,9 @@ int drop_capabilities(const char *file,
+ 		}
+ 	}
+ 
++	if (tb[CAP_CGRP])
++		apply_cgroups(tb[CAP_CGRP]);
++
+ 	/* Set additional groups read from cap list. Used for start scripts */
+ 	blobmsg_for_each_attr(cur, tb[CAP_GRPS], rem) {
+ 		if (ngroups < NGROUPS_MAX) {

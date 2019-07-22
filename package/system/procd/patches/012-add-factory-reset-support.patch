@@ -1,0 +1,71 @@
+From a16e3b1721fd4095fd6ed6b596c7e69034dcc4d8 Mon Sep 17 00:00:00 2001
+From: Jyoti Kumari <jyoti.kumari@intel.com>
+Date: Wed, 27 Mar 2019 13:57:09 +0530
+Subject: [PATCH] Add Factory Reset Support
+
+Added factory reset ubus method in procd which executes '/sbin/factoryreset' with optional argument.
+Platforms can replace this script with their own factoryreset implementations.
+
+Index: procd-2019-05-30-ade00ca5/system.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/system.c
++++ procd-2019-05-30-ade00ca5/system.c
+@@ -31,6 +31,9 @@
+ #include "sysupgrade.h"
+ #include "watchdog.h"
+ 
++#define MAX_LEN_PARAM_NAME 256
++#define FACTORYRESET_FILE_PATH "/sbin/factoryreset"
++
+ static struct blob_buf b;
+ static int notify;
+ static struct ubus_context *_ctx;
+@@ -410,6 +413,40 @@ static int sysupgrade(struct ubus_contex
+ 	return UBUS_STATUS_UNKNOWN_ERROR;
+ }
+ 
++ enum {
++	FACTORYRESET_VALUE,
++	__FACTORYRESET_MAX
++};
++
++static const struct blobmsg_policy factoryreset_policy[__FACTORYRESET_MAX] = {
++        [FACTORYRESET_VALUE] = { .name = "value", .type = BLOBMSG_TYPE_STRING },
++};
++
++static int factoryreset(struct ubus_context *ctx, struct ubus_object *obj,
++                        struct ubus_request_data *req, const char *method,
++                        struct blob_attr *msg)
++{
++	struct blob_attr *tb[__FACTORYRESET_MAX];
++	char cmd[MAX_LEN_PARAM_NAME], *buf = NULL;
++	int pid = -1;
++
++	blobmsg_parse(factoryreset_policy, __FACTORYRESET_MAX, tb, blob_data(msg), blob_len(msg));
++
++	pid = fork();
++	if(pid == 0){
++		if (!tb[FACTORYRESET_VALUE]){
++			execl("/bin/sh", "sh", "-c", FACTORYRESET_FILE_PATH, NULL);
++		}
++		else {
++			buf = blobmsg_get_string(tb[FACTORYRESET_VALUE]);
++			snprintf(cmd, MAX_LEN_PARAM_NAME, FACTORYRESET_FILE_PATH " %s", buf);
++			execl("/bin/sh", "sh", "-c", cmd, NULL);
++		}
++		exit(0);
++	}
++	return 0;
++}
++
+ static void
+ procd_subscribe_cb(struct ubus_context *ctx, struct ubus_object *obj)
+ {
+@@ -424,6 +461,7 @@ static const struct ubus_method system_m
+ 	UBUS_METHOD("watchdog", watchdog_set, watchdog_policy),
+ 	UBUS_METHOD("signal", proc_signal, signal_policy),
+ 	UBUS_METHOD("sysupgrade", sysupgrade, sysupgrade_policy),
++	UBUS_METHOD("factoryreset", factoryreset, factoryreset_policy),
+ };
+ 
+ static struct ubus_object_type system_object_type =

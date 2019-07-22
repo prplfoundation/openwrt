@@ -1,0 +1,356 @@
+From 486a58335fa47dec3cf463b78b2611fa5fd597e2 Mon Sep 17 00:00:00 2001
+From: Sudeep <t.sudeep@intel.com>
+Date: Thu, 6 Dec 2018 16:31:54 +0530
+Subject: [PATCH] acl for pseudofs (devfs, procfs and sysfs) for non root user. 
+Index: procd-2019-05-30-ade00ca5/service/instance.h
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/service/instance.h
++++ procd-2019-05-30-ade00ca5/service/instance.h
+@@ -19,6 +19,7 @@
+ #include <libubox/uloop.h>
+ #include <libubox/ustream.h>
+ #include "../utils/utils.h"
++#include <libubox/blobmsg_json.h>
+ 
+ #define RESPAWN_ERROR	(5 * 60)
+ 
+@@ -34,6 +35,12 @@ struct jail {
+ 	int argc;
+ };
+ 
++struct pseudofs_acl {
++	struct blobmsg_list devfs;
++	struct blobmsg_list procfs;
++	struct blobmsg_list sysfs;
++};
++
+ struct service_instance {
+ 	struct vlist_node node;
+ 	struct service *srv;
+@@ -61,6 +68,8 @@ struct service_instance {
+ 	struct jail jail;
+ 	char *seccomp;
+ 	char *capabilities;
++	bool has_pseudofs_acl;
++	struct  pseudofs_acl pseudofs_acl;
+ 	char *pidfile;
+ 	int syslog_facility;
+ 
+@@ -91,5 +100,8 @@ void instance_update(struct service_inst
+ void instance_init(struct service_instance *in, struct service *s, struct blob_attr *config);
+ void instance_free(struct service_instance *in);
+ void instance_dump(struct blob_buf *b, struct service_instance *in, int debug);
++int instance_config_parse_pseudofs_acl(struct service_instance *in,const char *file);
++void instance_set_pseudofs_acl(struct blob_attr *attr, char* node_name);
++void instance_update_pseudofs_acl(char* node_name);
+ 
+ #endif
+Index: procd-2019-05-30-ade00ca5/service/instance.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/service/instance.c
++++ procd-2019-05-30-ade00ca5/service/instance.c
+@@ -64,6 +64,7 @@ enum {
+ 	INSTANCE_ATTR_RELOADSIG,
+ 	INSTANCE_ATTR_TERMTIMEOUT,
+ 	INSTANCE_ATTR_FACILITY,
++	INSTANCE_ATTR_PSEUDOFS_ACL,
+ 	__INSTANCE_ATTR_MAX
+ };
+ 
+@@ -92,6 +93,7 @@ static const struct blobmsg_policy insta
+ 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
+ 	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
+ 	[INSTANCE_ATTR_FACILITY] = { "facility", BLOBMSG_TYPE_STRING },
++	[INSTANCE_ATTR_PSEUDOFS_ACL] = { "pseudofs_acl", BLOBMSG_TYPE_STRING },
+ };
+ 
+ enum {
+@@ -391,6 +393,27 @@ instance_run(struct service_instance *in
+ 		closefd(_stderr);
+ 	}
+ 
++	if (in->has_pseudofs_acl) {
++		/*update the pseudofs acl for devicenodes procfs and sysfs.*/
++       
++		char fs_path[MAX_LEN];
++		blobmsg_list_for_each(&in->pseudofs_acl.devfs, var)
++		{
++			snprintf(fs_path, sizeof(fs_path), "/dev/%s", (char*)blobmsg_name(var->data));
++			instance_set_pseudofs_acl(var->data , fs_path);
++		}
++		blobmsg_list_for_each(&in->pseudofs_acl.procfs, var)
++		{
++			snprintf(fs_path, sizeof(fs_path), "/proc/%s", (char*)blobmsg_name(var->data));
++			instance_set_pseudofs_acl(var->data , fs_path);
++		}
++		blobmsg_list_for_each(&in->pseudofs_acl.sysfs, var)
++		{
++			snprintf(fs_path, sizeof(fs_path), "/sys/%s", (char*)blobmsg_name(var->data));
++			instance_set_pseudofs_acl(var->data , fs_path);
++		}
++	}
++
+ 	if (in->uid) {
+ 		if ((p = getpwuid(in->uid)) == NULL)
+ 			exit(EXIT_FAILURE);
+@@ -725,6 +748,15 @@ instance_config_changed(struct service_i
+ 	if (!blobmsg_list_equal(&in->errors, &in_new->errors))
+ 		return true;
+ 
++	if (!blobmsg_list_equal(&in->pseudofs_acl.devfs, &in_new->pseudofs_acl.devfs))
++		return true;
++  
++	if (!blobmsg_list_equal(&in->pseudofs_acl.procfs, &in_new->pseudofs_acl.procfs))
++		return true;
++  
++	if (!blobmsg_list_equal(&in->pseudofs_acl.sysfs, &in_new->pseudofs_acl.sysfs))
++		return true;
++  
+ 	return false;
+ }
+ 
+@@ -986,6 +1018,18 @@ instance_config_parse(struct service_ins
+ 			in->capabilities = capabilities;
+ 	}
+ 
++	if (tb[INSTANCE_ATTR_PSEUDOFS_ACL]) {
++		/*get the file to be parsed for pseudofs acl.*/
++		char *pseudofs_acl = blobmsg_get_string(tb[INSTANCE_ATTR_PSEUDOFS_ACL]);
++		struct stat s;
++		if (stat(pseudofs_acl, &s))
++			ERROR("%s: not starting pseudofs acl as %s is missing\n", in->name, pseudofs_acl);
++		else
++		{
++			in->has_pseudofs_acl = instance_config_parse_pseudofs_acl(in, pseudofs_acl);
++		}
++	}
++  
+ 	if (tb[INSTANCE_ATTR_PIDFILE]) {
+ 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
+ 		if (pidfile)
+@@ -1042,6 +1086,9 @@ instance_config_cleanup(struct service_i
+ 	blobmsg_list_free(&in->file);
+ 	blobmsg_list_free(&in->limits);
+ 	blobmsg_list_free(&in->errors);
++	blobmsg_list_free(&in->pseudofs_acl.devfs);
++	blobmsg_list_free(&in->pseudofs_acl.procfs);
++	blobmsg_list_free(&in->pseudofs_acl.sysfs);
+ 	blobmsg_list_free(&in->jail.mount);
+ }
+ 
+@@ -1055,6 +1102,9 @@ instance_config_move(struct service_inst
+ 	blobmsg_list_move(&in->file, &in_src->file);
+ 	blobmsg_list_move(&in->limits, &in_src->limits);
+ 	blobmsg_list_move(&in->errors, &in_src->errors);
++	blobmsg_list_move(&in->pseudofs_acl.devfs, &in_src->pseudofs_acl.devfs);
++	blobmsg_list_move(&in->pseudofs_acl.procfs, &in_src->pseudofs_acl.procfs);
++	blobmsg_list_move(&in->pseudofs_acl.sysfs, &in_src->pseudofs_acl.sysfs);
+ 	blobmsg_list_move(&in->jail.mount, &in_src->jail.mount);
+ 	in->trigger = in_src->trigger;
+ 	in->command = in_src->command;
+@@ -1133,6 +1183,9 @@ instance_init(struct service_instance *i
+ 	blobmsg_list_simple_init(&in->data);
+ 	blobmsg_list_simple_init(&in->limits);
+ 	blobmsg_list_simple_init(&in->errors);
++	blobmsg_list_simple_init(&in->pseudofs_acl.devfs);
++	blobmsg_list_simple_init(&in->pseudofs_acl.procfs);
++	blobmsg_list_simple_init(&in->pseudofs_acl.sysfs);
+ 	blobmsg_list_simple_init(&in->jail.mount);
+ 	in->valid = instance_config_parse(in);
+ }
+@@ -1207,6 +1260,38 @@ void instance_dump(struct blob_buf *b, s
+ 	if (in->capabilities)
+ 		blobmsg_add_string(b, "capabilities", in->capabilities);
+ 
++	if (in->has_pseudofs_acl)
++	{
++		blobmsg_add_u8(b, "has_pseudofs_acl", in->has_pseudofs_acl);
++		if (!avl_is_empty(&in->pseudofs_acl.devfs.avl)) {
++			struct blobmsg_list_node *var;
++			void *e = blobmsg_open_table(b, "devfs");
++			blobmsg_list_for_each(&in->pseudofs_acl.devfs, var)
++			{
++				blobmsg_add_blob(b, var->data);
++			}
++			blobmsg_close_table(b, e);
++		}
++		if (!avl_is_empty(&in->pseudofs_acl.procfs.avl)) {
++			struct blobmsg_list_node *var;
++			void *e = blobmsg_open_table(b, "procfs");
++			blobmsg_list_for_each(&in->pseudofs_acl.procfs, var)
++			{
++				blobmsg_add_blob(b, var->data);
++			}
++			blobmsg_close_table(b, e);
++		}
++		if (!avl_is_empty(&in->pseudofs_acl.sysfs.avl)) {
++			struct blobmsg_list_node *var;
++			void *e = blobmsg_open_table(b, "sysfs");
++			blobmsg_list_for_each(&in->pseudofs_acl.sysfs, var)
++			{
++				blobmsg_add_blob(b, var->data);
++			}
++			blobmsg_close_table(b, e);
++		}
++	}
++	 
+ 	if (in->pidfile)
+ 		blobmsg_add_string(b, "pidfile", in->pidfile);
+ 
+@@ -1242,3 +1327,130 @@ void instance_dump(struct blob_buf *b, s
+ 
+ 	blobmsg_close_table(b, i);
+ }
++
++int instance_config_parse_pseudofs_acl(struct service_instance *in,const char *file)
++{
++	enum {
++		PSEUDOFS_ACL_DEVFS,
++		PSEUDOFS_ACL_PROCFS,
++		PSEUDOFS_ACL_SYSFS,
++		__PSEUDOFS_ACL_MAX
++	};
++	static const struct blobmsg_policy policy[__PSEUDOFS_ACL_MAX] = {
++		[PSEUDOFS_ACL_DEVFS] = { .name = "devfs", .type = BLOBMSG_TYPE_TABLE },
++		[PSEUDOFS_ACL_PROCFS] = { .name = "procfs", .type = BLOBMSG_TYPE_TABLE },
++		[PSEUDOFS_ACL_SYSFS] = { .name = "sysfs", .type = BLOBMSG_TYPE_TABLE },
++	};
++	struct blob_buf b = { 0 };
++	struct blob_attr *tb[__PSEUDOFS_ACL_MAX];
++ 	
++	if (file != NULL) {
++	
++		blob_buf_init(&b, 0);
++		if (!blobmsg_add_json_from_file(&b, file)) {
++			return 0;
++		}
++	  
++		blobmsg_parse(policy, __PSEUDOFS_ACL_MAX, tb, blob_data(b.head), blob_len(b.head));
++	
++		if ((!tb[PSEUDOFS_ACL_DEVFS]) && (!tb[PSEUDOFS_ACL_PROCFS]) && (!tb[PSEUDOFS_ACL_SYSFS]))
++		{
++			return 0;
++		}
++	
++		if(tb[PSEUDOFS_ACL_DEVFS])
++		{
++			instance_fill_any(&in->pseudofs_acl.devfs, tb[PSEUDOFS_ACL_DEVFS]);
++		}
++		if(tb[PSEUDOFS_ACL_PROCFS])
++		{
++			instance_fill_any(&in->pseudofs_acl.procfs, tb[PSEUDOFS_ACL_PROCFS]);
++		}
++		if(tb[PSEUDOFS_ACL_SYSFS])
++		{
++			instance_fill_any(&in->pseudofs_acl.sysfs, tb[PSEUDOFS_ACL_SYSFS]);
++		}
++	}
++  
++	return 1;
++}
++void instance_set_pseudofs_acl(struct blob_attr *pseudofs_acl_node, char* node_name)
++{
++	struct stat s;
++	uid_t user = {0}; 
++	gid_t group = {0}; 
++	struct blob_attr *cur = NULL;
++  	
++	if(node_name == NULL || pseudofs_acl_node == NULL)
++		return;
++
++	if (stat(node_name, &s))
++ 	{
++		ERROR("Error in setting pseudofs acl as %s is not available\n",  node_name);
++		return;
++	}
++  
++	int pseudofs_acl_len = blobmsg_len(pseudofs_acl_node);
++  	
++	__blob_for_each_attr(cur, blobmsg_data(pseudofs_acl_node), pseudofs_acl_len)
++	{
++		if(strcmp((char*)blobmsg_name(cur), "user" ) == 0)
++		{
++			struct passwd *p = getpwnam(blobmsg_data(cur));
++			if (p) {
++				user = p->pw_uid;
++			}
++		}
++		else if(strcmp((char*)blobmsg_name(cur), "group" ) == 0)
++		{
++			struct group *g = getgrnam(blobmsg_data(cur));
++			if (g) {
++				group = g->gr_gid;
++			}
++		}
++		else if(strcmp((char*)blobmsg_name(cur), "mask" ) == 0)
++		{
++			char* mask = (char*)blobmsg_data(cur);
++			if (chmod(node_name, strtol(mask, 0, 8)) < 0)
++			{
++				ERROR(" cannot set umask for %s with user %d group %d (%s)\n", node_name, user, group, strerror(errno));
++			}
++		}
++	}/*end of loop*/
++	if (chown(node_name, user, group) < 0)
++	{
++		ERROR(" cannot set group for %s with user %d group %d (%s)\n", node_name, user, group, strerror(errno));
++	}
++	return;
++}
++void instance_update_pseudofs_acl(char* node_name)
++{
++	struct service *s;
++	struct blobmsg_list_node *var;
++	struct service_instance *in;
++	struct service_instance *cur_in = NULL;
++	char fs_path[MAX_LEN];
++	int flag;
++	if(node_name == NULL)
++		return; 
++	avl_for_each_element(&services, s, avl) {
++		if (!avl_is_empty(&s->instances.avl)) {
++			if((flag = (cur_in?strcmp(cur_in->srv->name, s->name):1))) {
++				vlist_for_each_element(&s->instances, in, node) {
++					if (in->has_pseudofs_acl) {
++						/*update the pseudofs acl for devicenodes.*/
++						blobmsg_list_for_each(&in->pseudofs_acl.devfs, var)
++						{
++							snprintf(fs_path, sizeof(fs_path), "/dev/%s", (char*)blobmsg_name(var->data));
++							if(strcmp(fs_path,node_name) == 0){
++								instance_set_pseudofs_acl(var->data, node_name);
++							}
++						}
++					}
++				}
++			}
++		}
++	}
++	return ;
++}
++  
+Index: procd-2019-05-30-ade00ca5/plug/hotplug.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/plug/hotplug.c
++++ procd-2019-05-30-ade00ca5/plug/hotplug.c
+@@ -34,9 +34,12 @@
+ 
+ #include "../procd.h"
+ 
++#include "../service/instance.h"
++  
+ #include "hotplug.h"
+ 
+ #define HOTPLUG_WAIT	500
++#define MAX_LEN	64
+ 
+ struct cmd_handler;
+ struct cmd_queue {
+@@ -173,6 +176,8 @@ static void handle_makedev(struct blob_a
+ 				makedev(atoi(major), atoi(minor)));
+ 		if (tb[2])
+ 			chgrp_target(tb[2], tb[0]);
++		else
++			instance_update_pseudofs_acl(blobmsg_get_string(tb[0]));
+ 	}
+ 	umask(oldumask);
+ }

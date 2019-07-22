@@ -1,0 +1,69 @@
+From d75d4788bae784e9b983f067b1a508c85596d148 Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Wed, 7 Feb 2018 19:27:47 +0530
+Subject: [PATCH] Add custom lib path to jail for a library scan
+
+Index: procd-2017-08-08-66be6a23/jail/jail.c
+===================================================================
+--- procd-2017-08-08-66be6a23.orig/jail/jail.c
++++ procd-2017-08-08-66be6a23/jail/jail.c
+@@ -26,6 +26,8 @@
+ #include <sched.h>
+ #include <linux/limits.h>
+ #include <signal.h>
++#include <sys/types.h>
++#include <dirent.h>
+ 
+ #include "capabilities.h"
+ #include "elf.h"
+@@ -315,6 +317,8 @@ int main(int argc, char **argv)
+ 	char log[] = "/dev/log";
+ 	char ubus[] = "/var/run/ubus.sock";
+ 	int ch, i;
++	char lib_str[PATH_MAX], *lib_name, *env_param;
++	DIR *dp;	
+ 
+ 	if (uid) {
+ 		ERROR("not root, aborting: %s\n", strerror(errno));
+@@ -351,6 +355,16 @@ int main(int argc, char **argv)
+ 			break;
+ 		case 'L':
+ 			opts.env = optarg;
++			env_param = strchr(opts.env, '=');
++			env_param++;
++			snprintf(lib_str, sizeof(lib_str), "%s", env_param);
++			lib_name = strtok(lib_str, ":");
++			while (lib_name != NULL){
++				if (NULL != (dp = opendir(lib_name))) {
++					alloc_library_path(lib_name);
++				}
++				lib_name = strtok (NULL, ":");
++			}
+ 			break;
+ 		case 'c':
+ 			opts.no_new_privs = 1;
+Index: procd-2017-08-08-66be6a23/jail/elf.c
+===================================================================
+--- procd-2017-08-08-66be6a23.orig/jail/elf.c
++++ procd-2017-08-08-66be6a23/jail/elf.c
+@@ -29,7 +29,7 @@
+ struct avl_tree libraries;
+ static LIST_HEAD(library_paths);
+ 
+-static void alloc_library_path(const char *path)
++void alloc_library_path(const char *path)
+ {
+ 	struct stat s;
+ 	if (stat(path, &s))
+Index: procd-2017-08-08-66be6a23/jail/elf.h
+===================================================================
+--- procd-2017-08-08-66be6a23.orig/jail/elf.h
++++ procd-2017-08-08-66be6a23/jail/elf.h
+@@ -29,6 +29,7 @@ struct library_path {
+ 
+ extern struct avl_tree libraries;
+ 
++void alloc_library_path(const char *path); 
+ void alloc_library(const char *path, const char *name);
+ int elf_load_deps(const char *path, const char *map);
+ const char* find_lib(const char *file);

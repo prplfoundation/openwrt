@@ -1,0 +1,15 @@
+From 7960883401c911ffc9e146d02ef424ee7732a0f3 Mon Sep 17 00:00:00 2001
+From: Sudeep <t.sudeep@intel.com>
+Date: Fri, 5 Oct 2018 11:38:31 +0530
+Subject: [PATCH] UGW_SW-31227 : ubusd-running-in-non-root-mode
+
+--- a/service/service.c	2018-10-04 02:56:39.343010630 +0530
++++ b/service/service.c	2018-10-04 02:57:30.514136296 +0530
+@@ -585,6 +585,7 @@
+ 	blobmsg_add_string(&b, "name", name);
+ 	instances = blobmsg_open_table(&b, "instances");
+ 	instance = blobmsg_open_table(&b, "instance1");
++	blobmsg_add_string(&b, "user", "ubusd");
+ 	command = blobmsg_open_array(&b, "command");
+ 	t = strtok(cmdline, " ");
+ 	while (t) {

@@ -1,0 +1,85 @@
+From d06f11a7319dbc5c9f63ae74a5cbb6e3b2af07fd Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Mon, 28 May 2018 11:36:51 +0530
+Subject: [PATCH] Pass capabilites json file name from startup script for
+ujail. This way root can lower its capabilties as mentioned in json file.
+
+---
+ service/instance.c | 20 ++++++++++++++++++++
+ service/instance.h |  1 +
+ 2 files changed, 21 insertions(+)
+
+diff --git a/service/instance.c b/service/instance.c
+index 36ebf84..0a9e1cc 100644
+--- a/service/instance.c
++++ b/service/instance.c
+@@ -53,6 +53,7 @@ enum {
+ 	INSTANCE_ATTR_JAIL,
+ 	INSTANCE_ATTR_TRACE,
+ 	INSTANCE_ATTR_SECCOMP,
++	INSTANCE_ATTR_CAPABILITIES,
+ 	INSTANCE_ATTR_PIDFILE,
+ 	INSTANCE_ATTR_RELOADSIG,
+ 	INSTANCE_ATTR_TERMTIMEOUT,
+@@ -78,6 +79,7 @@ static const struct blobmsg_policy instance_attr[__INSTANCE_ATTR_MAX] = {
+ 	[INSTANCE_ATTR_JAIL] = { "jail", BLOBMSG_TYPE_TABLE },
+ 	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
+ 	[INSTANCE_ATTR_SECCOMP] = { "seccomp", BLOBMSG_TYPE_STRING },
++	[INSTANCE_ATTR_CAPABILITIES] = { "capabilities", BLOBMSG_TYPE_STRING },
+ 	[INSTANCE_ATTR_PIDFILE] = { "pidfile", BLOBMSG_TYPE_STRING },
+ 	[INSTANCE_ATTR_RELOADSIG] = { "reload_signal", BLOBMSG_TYPE_INT32 },
+ 	[INSTANCE_ATTR_TERMTIMEOUT] = { "term_timeout", BLOBMSG_TYPE_INT32 },
+@@ -208,6 +210,11 @@ jail_run(struct service_instance *in, char **argv)
+ 		argv[argc++] = in->seccomp;
+ 	}
+ 
++	if (in->capabilities) {
++		argv[argc++] = "-C";
++		argv[argc++] = in->capabilities;
++	}
++
+ 	if (in->no_new_privs)
+ 		argv[argc++] = "-c";
+ 
+@@ -898,6 +905,16 @@ instance_config_parse(struct service_instance *in)
+ 			in->seccomp = seccomp;
+ 	}
+ 
++	if (!in->trace && tb[INSTANCE_ATTR_CAPABILITIES]) {
++		char *capabilities = blobmsg_get_string(tb[INSTANCE_ATTR_CAPABILITIES]);
++		struct stat s;
++
++		if (stat(capabilities, &s))
++			ERROR("%s: not starting capabilities as %s is missing\n", in->name, capabilities);
++		else
++			in->capabilities = capabilities;
++	}
++
+ 	if (tb[INSTANCE_ATTR_PIDFILE]) {
+ 		char *pidfile = blobmsg_get_string(tb[INSTANCE_ATTR_PIDFILE]);
+ 		if (pidfile)
+@@ -1097,6 +1114,9 @@ void instance_dump(struct blob_buf *b, struct service_instance *in, int verbose)
+ 	if (in->seccomp)
+ 		blobmsg_add_string(b, "seccomp", in->seccomp);
+ 
++	if (in->capabilities)
++		blobmsg_add_string(b, "capabilities", in->capabilities);
++
+ 	if (in->pidfile)
+ 		blobmsg_add_string(b, "pidfile", in->pidfile);
+ 
+diff --git a/service/instance.h b/service/instance.h
+index 78999c8..dd3eb2c 100644
+--- a/service/instance.h
++++ b/service/instance.h
+@@ -57,6 +57,7 @@ struct service_instance {
+ 	bool no_new_privs;
+ 	struct jail jail;
+ 	char *seccomp;
++	char *capabilities;
+ 	char *pidfile;
+ 
+ 	uint32_t term_timeout;
+-- 
+2.11.0
+

@@ -1,0 +1,331 @@
+From c553688004f5bfd9bb28f328f928fd9e8ee8a6d2 Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Thu, 7 Feb 2019 16:10:00 +0530
+Subject: [PATCH] Run startup script in non-root user 'sscript'
+
+SDL: Run startup script in non-root user 'sscript'. This makes
+sure that startup scripts role is limited to config generation
+and spawning daemons via procd and no capabilities are required.
+Also a trust boundary is added via file access controls. This way
+core system logics are not spread across scripts, but isolated to
+external daemons.
+But here we adds optional capability provision for start scripts
+to provide minimal required capabilities in special cases where
+a daemon is not required, but can be achieved by few commands in
+bootup. Such scripts are 'boot', 'sysctl', 'done', etc.
+The feature will not be active if 'sscript' user is not found,
+added for vanilla OpenWrt compatability.
+Added optional specifying of supplementary groups via caps file.
+--- a/rcS.c
++++ b/rcS.c
+@@ -24,13 +24,20 @@
+ 
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <linux/limits.h>
+ #include <fcntl.h>
+ #include <glob.h>
++#include <libgen.h>
++#include <grp.h>
++#include <pwd.h>
+ 
+ #include <libubox/ustream.h>
+ 
+ #include "procd.h"
+ #include "rcS.h"
++#include "jail/capabilities.h"
++
++#define RC_USER "sscript"
+ 
+ static struct runqueue q, r;
+ 
+@@ -41,6 +48,9 @@ struct initd {
+ 	char *param;
+ };
+ 
++uid_t rc_uid = 0;
++gid_t rc_gid = 0;
++
+ static void pipe_cb(struct ustream *s, int bytes)
+ {
+ 	struct initd *initd = container_of(s, struct initd, fd.stream);
+@@ -67,8 +77,11 @@ static void pipe_cb(struct ustream *s, i
+ static void q_initd_run(struct runqueue *q, struct runqueue_task *t)
+ {
+ 	struct initd *s = container_of(t, struct initd, proc.task);
++	uint64_t usercaps = 0LLU;
+ 	int pipefd[2];
+ 	pid_t pid;
++	gid_t gid = 0;
++	char buf[PATH_MAX], buf2[256], *b = NULL;
+ 
+ 	DEBUG(2, "start %s %s \n", s->file, s->param);
+ 	if (pipe(pipefd) == -1) {
+@@ -99,6 +112,46 @@ static void q_initd_run(struct runqueue
+ 	if (devnull > STDERR_FILENO)
+ 		close(devnull);
+ 
++	if (rc_uid && rc_gid) {
++		if(realpath(s->file, buf) == NULL) {
++			strncpy(buf, s->file, sizeof(buf));
++		}
++
++		if (initgroups(RC_USER, rc_gid) != 0)
++			exit(EXIT_FAILURE);
++
++		/* Here we can add a capability file to startup script. Capability file is read based on
++		 * startup script's base name from capabilities path. To protect being misused, explicilty
++		 * check if script read from /etc/init.d path itself (directory must be protected with
++		 * read-only mask). Because a rogue application may steal others capabilities by executing
++		 * another script with same name from different path.
++		 */
++		b = basename(buf);
++		snprintf(buf2, sizeof(buf2), "/usr/share/capabilities/%s_%s_cap.json", RC_USER, b);
++
++		if ((strncmp(buf, "/etc/init.d/", 12) == 0) && (access(buf2, R_OK) == 0)) {
++			(void) drop_capabilities(buf2, &usercaps, rc_uid, &gid);
++		} else {
++			(void) drop_capabilities(NULL, &usercaps, rc_uid, NULL);
++		}
++
++		if (gid) {
++			if (setgid(gid)) {
++				ERROR("failed to set group id %d: %d (%s)\n", gid, errno, strerror(errno));
++			}
++		} else if (setgid(rc_gid)) {
++			ERROR("failed to set group id %d: %d (%s)\n", rc_gid, errno, strerror(errno));
++			exit(127);
++		}
++
++		if (setuid(rc_uid)) {
++			ERROR("failed to set user id %d: %d (%s)\n", rc_uid, errno, strerror(errno));
++			exit(127);
++		}
++
++		(void) user_capabilities(usercaps, rc_uid);
++	}
++
+ 	execlp(s->file, s->file, s->param, NULL);
+ 	exit(1);
+ }
+@@ -172,6 +225,11 @@ int rcS(char *pattern, char *parrc_uidd
+ 	runqueue_init(&q);
+ 	q.empty_cb = q_empty;
+ 	q.max_running_tasks = 1;
++	struct passwd *p = getpwnam(RC_USER);
++	if (p) {
++		rc_uid = p->pw_uid;
++		rc_gid = p->pw_gid;
++	}
+ 
+ 	return _rc(&q, "/etc/rc.d", pattern, "*", param);
+ }
+--- a/jail/capabilities.c
++++ b/jail/capabilities.c
+@@ -18,6 +18,8 @@
+ 
+ #include <libubox/blobmsg.h>
+ #include <libubox/blobmsg_json.h>
++#include <grp.h>
++#include <limits.h>
+ 
+ #include "log.h"
+ #include "../capabilities-names.h"
+@@ -36,16 +38,22 @@ static int find_capabilities(const char
+ 	return -1;
+ }
+ 
+-int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid)
++int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid, gid_t *gid)
+ {
++	struct group *g;
++	gid_t glist[NGROUPS_MAX];
++	int ngroups = 0;
++
+ 	enum {
+ 		CAP_KEEP,
+ 		CAP_DROP,
++		CAP_GRPS,
+ 		__CAP_MAX
+ 	};
+ 	static const struct blobmsg_policy policy[__CAP_MAX] = {
+ 		[CAP_KEEP] = { .name = "cap.keep", .type = BLOBMSG_TYPE_ARRAY },
+ 		[CAP_DROP] = { .name = "cap.drop", .type = BLOBMSG_TYPE_ARRAY },
++		[CAP_GRPS] = { .name = "cap.groups", .type = BLOBMSG_TYPE_ARRAY },
+ 	};
+ 	struct blob_buf b = { 0 };
+ 	struct blob_attr *tb[__CAP_MAX];
+@@ -53,6 +61,8 @@ int drop_capabilities(const char *file,
+ 	int rem, cap;
+ 	char *name;
+ 	uint64_t capdrop = 0LLU;
++	int chk_flag = 0;
++	bool grp_flag = 0;
+ 
+ 	if (file != NULL) {
+ 
+@@ -66,10 +76,32 @@ int drop_capabilities(const char *file,
+ 
+ 	blobmsg_parse(policy, __CAP_MAX, tb, blob_data(b.head), blob_len(b.head));
+ 	if (!tb[CAP_KEEP] && !tb[CAP_DROP]) {
+-		ERROR("failed to parse %s\n", file);
+-		return -1;
++		if (tb[CAP_GRPS])
++			grp_flag = 1;
++		else {
++			ERROR("failed to parse %s\n", file);
++			return -1;
++		}
+ 	}
+ 
++	/* Set additional groups read from cap list. Used for start scripts */
++	blobmsg_for_each_attr(cur, tb[CAP_GRPS], rem) {
++		if (ngroups < NGROUPS_MAX) {
++			name = blobmsg_get_string(cur);
++			if (name) {
++				chk_flag++;
++				if (!(g = getgrnam(name)))
++					continue;
++				if ((chk_flag == 1) && gid)
++					*gid = g->gr_gid;
++				glist[ngroups++] = g->gr_gid;
++			}
++		}
++	}
++
++	if (ngroups)
++		(void) setgroups(ngroups, glist);
++
+ 	blobmsg_for_each_attr(cur, tb[CAP_KEEP], rem) {
+ 		name = blobmsg_get_string(cur);
+ 		if (!name) {
+@@ -84,7 +116,7 @@ int drop_capabilities(const char *file,
+ 		capdrop |= (1LLU << cap);
+ 	}
+ 
+-	if (capdrop == 0LLU) {
++	if (capdrop == 0LLU && !grp_flag) {
+ 		DEBUG("cap.keep empty -> only dropping capabilities from cap.drop (blacklist)\n");
+ 		capdrop = 0xffffffffffffffffLLU;
+ 	} else {
+--- a/jail/capabilities.h
++++ b/jail/capabilities.h
+@@ -13,7 +13,7 @@
+ #ifndef _JAIL_CAPABILITIES_H_
+ #define _JAIL_CAPABILITIES_H_
+ 
+-int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid);
++int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid, gid_t *gid);
+ int user_capabilities(uint64_t caps, uid_t uid);
+ 
+ #endif
+--- a/jail/jail.c
++++ b/jail/jail.c
+@@ -242,7 +242,7 @@ and will only drop capabilities/apply se
+ 
+ static int exec_jail(void *_notused)
+ {
+-	if (opts.capabilities && drop_capabilities(opts.capabilities, NULL, 0))
++	if (opts.capabilities && drop_capabilities(opts.capabilities, NULL, 0, NULL))
+ 		exit(EXIT_FAILURE);
+ 
+ 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+--- a/service/instance.c
++++ b/service/instance.c
+@@ -406,7 +406,7 @@ instance_run(struct service_instance *in
+ 	}
+ 
+ 	if (in->uid || capabilities) {
+-		if (drop_capabilities(in->capabilities, &usercaps, in->uid))
++		if (drop_capabilities(in->capabilities, &usercaps, in->uid, NULL))
+ 			exit(EXIT_FAILURE);
+ 	}
+ 
+--- a/service/trigger.c
++++ b/service/trigger.c
+@@ -15,6 +15,7 @@
+ #include <sys/stat.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
++#include <linux/limits.h>
+ 
+ #include <libubox/blobmsg_json.h>
+ #include <libubox/json_script.h>
+@@ -28,8 +29,15 @@
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <libgen.h>
++#include <grp.h>
+ 
+ #include "../procd.h"
++#include "../jail/capabilities.h"
++
++#define RC_USER "sscript"
++
++extern uid_t rc_uid;
++extern gid_t rc_gid;
+ 
+ struct trigger {
+ 	struct list_head list;
+@@ -101,10 +109,13 @@ static void trigger_command_run(struct r
+ {
+ 	struct trigger_command *cmd = container_of(t, struct trigger_command, proc.task);
+ 	struct blob_attr *cur;
++	uint64_t usercaps = 0LLU;
+ 	char **argv;
+ 	pid_t pid;
+ 	int n = 0;
+ 	int rem;
++	char buf[PATH_MAX], buf2[256], *b = NULL;
++	gid_t gid = 0;
+ 
+ 	pid = fork();
+ 	if (pid < 0) {
+@@ -132,6 +143,47 @@ static void trigger_command_run(struct r
+ 		argv[n++] = blobmsg_get_string(cur);
+ 	argv[n] = NULL;
+ 
++	if (rc_uid && rc_gid) {
++		if(realpath(argv[0], buf) == NULL) {
++			strncpy(buf, argv[0], sizeof(buf));
++		}
++
++		if (initgroups(RC_USER, rc_gid) != 0)
++			exit(EXIT_FAILURE);
++
++		/* Here we can add a capability file to startup script. Capability file is read based on
++		 * startup script's base name from capabilities path. To protect being misused, explicilty
++		 * check if script read from /etc/init.d path itself (directory must be protected with
++		 * read-only mask). Because a rogue application may steal others capabilities by executing
++		 * another script with same name from different path.
++		 */
++		b = basename(buf);
++		snprintf(buf2, sizeof(buf2), "/usr/share/capabilities/%s_%s_cap.json", RC_USER, b);
++
++		if ((strncmp(buf, "/etc/init.d/", 12) == 0) && (access(buf2, R_OK) == 0)) {
++			(void) drop_capabilities(buf2, &usercaps, rc_uid, &gid);
++		} else {
++			(void) drop_capabilities(NULL, &usercaps, rc_uid, NULL);
++		}
++
++		if (gid) {
++			if (setgid(gid)) {
++				ERROR("failed to set group id %d: %d (%s)\n", 21, errno, strerror(errno));
++				exit(127);
++			}
++		} else if (setgid(rc_gid)) {
++			ERROR("failed to set group id %d: %d (%s)\n", 21, errno, strerror(errno));
++			exit(127);
++		}
++
++		if (setuid(rc_uid)) {
++			ERROR("failed to set user id %d: %d (%s)\n", 20, errno, strerror(errno));
++			exit(127);
++		}
++
++		(void) user_capabilities(usercaps, rc_uid);
++	}
++
+ 	if (n > 0)
+ 		execvp(argv[0], &argv[0]);
+ 

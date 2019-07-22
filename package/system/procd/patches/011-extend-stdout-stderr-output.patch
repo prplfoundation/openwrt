@@ -1,0 +1,83 @@
+From 33a8ad49d2b0aaa0af19ef3ac2fd866159e3539d Mon Sep 17 00:00:00 2001
+From: Krystoforski RafalX <rafalx.krystoforski@intel.com>
+Date: Mon, 18 Mar 2019 16:25:19 +0100
+Subject: [PATCH] Extend the stdout and stderr output
+
+Extend the stdout and stderr output possibility.
+New option '2' added to allow console output.
+
+All possible options:
+procd_set_param stdout/stderr is not set: output -> /dev/null
+procd_set_param stdout/stderr 0: output -> /dev/null
+procd_set_param stdout/stderr 1: output -> logread
+procd_set_param stdout/stderr 2: output -> /dev/console
+
+Index: procd-2019-05-30-ade00ca5/service/instance.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/service/instance.c
++++ procd-2019-05-30-ade00ca5/service/instance.c
+@@ -82,8 +82,8 @@ static const struct blobmsg_policy insta
+ 	[INSTANCE_ATTR_ERROR] = { "error", BLOBMSG_TYPE_ARRAY },
+ 	[INSTANCE_ATTR_USER] = { "user", BLOBMSG_TYPE_STRING },
+ 	[INSTANCE_ATTR_GROUP] = { "group", BLOBMSG_TYPE_STRING },
+-	[INSTANCE_ATTR_STDOUT] = { "stdout", BLOBMSG_TYPE_BOOL },
+-	[INSTANCE_ATTR_STDERR] = { "stderr", BLOBMSG_TYPE_BOOL },
++	[INSTANCE_ATTR_STDOUT] = { "stdout", BLOBMSG_TYPE_INT32 },
++	[INSTANCE_ATTR_STDERR] = { "stderr", BLOBMSG_TYPE_INT32 },
+ 	[INSTANCE_ATTR_NO_NEW_PRIVS] = { "no_new_privs", BLOBMSG_TYPE_BOOL },
+ 	[INSTANCE_ATTR_JAIL] = { "jail", BLOBMSG_TYPE_TABLE },
+ 	[INSTANCE_ATTR_TRACE] = { "trace", BLOBMSG_TYPE_BOOL },
+@@ -374,11 +374,19 @@ instance_run(struct service_instance *in
+ 
+ 	_stdin = open("/dev/null", O_RDONLY);
+ 
+-	if (_stdout == -1)
+-		_stdout = open("/dev/null", O_WRONLY);
++	if (_stdout == -1) {
++		if (in->_stdout.fd.fd == -3)
++			_stdout = open("/dev/null", O_WRONLY);
++		if (in->_stdout.fd.fd == -2)
++			_stdout = open("/dev/console", O_WRONLY);
++	}
+ 
+-	if (_stderr == -1)
+-		_stderr = open("/dev/null", O_WRONLY);
++	if (_stderr == -1) {
++		if (in->_stderr.fd.fd == -3)
++			_stderr = open("/dev/null", O_WRONLY);
++		if (in->_stderr.fd.fd == -2)
++			_stderr = open("/dev/console", O_WRONLY);
++	}
+ 
+ 	if (_stdin > -1) {
+ 		dup2(_stdin, STDIN_FILENO);
+@@ -1042,11 +1050,11 @@ instance_config_parse(struct service_ins
+ 	if (!in->trace && tb[INSTANCE_ATTR_JAIL])
+ 		in->has_jail = instance_jail_parse(in, tb[INSTANCE_ATTR_JAIL]);
+ 
+-	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDOUT]))
+-		in->_stdout.fd.fd = -1;
++	if (tb[INSTANCE_ATTR_STDOUT] && blobmsg_get_u32(tb[INSTANCE_ATTR_STDOUT]))
++		in->_stdout.fd.fd = - blobmsg_get_u32(tb[INSTANCE_ATTR_STDOUT]);
+ 
+-	if (tb[INSTANCE_ATTR_STDERR] && blobmsg_get_bool(tb[INSTANCE_ATTR_STDERR]))
+-		in->_stderr.fd.fd = -1;
++	if (tb[INSTANCE_ATTR_STDERR] && blobmsg_get_u32(tb[INSTANCE_ATTR_STDERR]))
++		in->_stderr.fd.fd = - blobmsg_get_u32(tb[INSTANCE_ATTR_STDERR]);
+ 
+ 	instance_fill_any(&in->data, tb[INSTANCE_ATTR_DATA]);
+ 
+@@ -1169,11 +1177,11 @@ instance_init(struct service_instance *i
+ 	in->term_timeout = 5;
+ 	in->syslog_facility = LOG_DAEMON;
+ 
+-	in->_stdout.fd.fd = -2;
++	in->_stdout.fd.fd = -3;
+ 	in->_stdout.stream.string_data = true;
+ 	in->_stdout.stream.notify_read = instance_stdout;
+ 
+-	in->_stderr.fd.fd = -2;
++	in->_stderr.fd.fd = -3;
+ 	in->_stderr.stream.string_data = true;
+ 	in->_stderr.stream.notify_read = instance_stderr;
+ 

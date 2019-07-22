@@ -1,0 +1,258 @@
+From 763a564fdf7bbae367b05e233afae77cf0354789 Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Fri, 3 Aug 2018 11:22:58 +0530
+Subject: [PATCH] Extend capabilities support for normal user running
+ without jail to upgrade its privileges as mentioned in a json file.
+
+Logic: In forked procd child spawned to execute a service daemon, drop
+all caps, set all capabilities as mentioned in input json file and
+additionally inherit (PR_SET_KEEPCAPS) following required caps:-
+ 1. caps to do a switch to normal user CAP_SETGID, CAP_SETUID
+ 2. cap to add or remove caps CAP_SETPCAP
+ 3. and cap to execute a daemon owned by root CAP_DAC_OVERRIDE.
+Later switch to user, drop all additionally inherited caps and inherit
+only required caps from json before executing the actual daemon.
+
+Sample json file:
+{
+	"cap.keep": [
+		"cap_net_admin",
+		"cap_net_raw",
+	],
+	"cap.drop": []
+}
+---
+ CMakeLists.txt      |  3 ++-
+ jail/capabilities.c | 60 ++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ jail/capabilities.h |  3 ++-
+ jail/jail.c         |  2 +-
+ service/instance.c  | 14 +++++++++++++
+ 5 files changed, 78 insertions(+), 4 deletions(-)
+
+Index: procd-2019-05-30-ade00ca5/CMakeLists.txt
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/CMakeLists.txt
++++ procd-2019-05-30-ade00ca5/CMakeLists.txt
+@@ -20,7 +20,7 @@ INSTALL(TARGETS setlbf
+ 
+ SET(SOURCES procd.c signal.c state.c inittab.c rcS.c ubus.c system.c sysupgrade.c
+ 	service/service.c service/instance.c service/validate.c service/trigger.c service/watch.c
+-	utils/utils.c)
++	utils/utils.c jail/capabilities.c)
+ IF(NOT DISABLE_INIT)
+   SET(SOURCES ${SOURCES} watchdog.c plug/coldplug.c plug/hotplug.c)
+ ENDIF()
+@@ -47,6 +47,7 @@ TARGET_LINK_LIBRARIES(procd ${LIBS})
+ INSTALL(TARGETS procd
+ 	RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}
+ )
++ADD_DEPENDENCIES(procd capabilities-names-h)
+ 
+ FIND_PATH(ubox_include_dir libubox/uloop.h)
+ INCLUDE_DIRECTORIES(${ubox_include_dir})
+Index: procd-2019-05-30-ade00ca5/jail/capabilities.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/jail/capabilities.c
++++ procd-2019-05-30-ade00ca5/jail/capabilities.c
+@@ -14,6 +14,7 @@
+ #define _GNU_SOURCE 1
+ #include <syslog.h>
+ #include <sys/prctl.h>
++#include <linux/capability.h>
+ 
+ #include <libubox/blobmsg.h>
+ #include <libubox/blobmsg_json.h>
+@@ -22,6 +23,8 @@
+ #include "../capabilities-names.h"
+ #include "capabilities.h"
+ 
++extern int capset(cap_user_header_t header, cap_user_data_t data);
++
+ static int find_capabilities(const char *name)
+ {
+ 	int i;
+@@ -33,7 +36,7 @@ static int find_capabilities(const char
+ 	return -1;
+ }
+ 
+-int drop_capabilities(const char *file)
++int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid)
+ {
+ 	enum {
+ 		CAP_KEEP,
+@@ -51,6 +54,8 @@ int drop_capabilities(const char *file)
+ 	char *name;
+ 	uint64_t capdrop = 0LLU;
+ 
++	if (file != NULL) {
++
+ 	DEBUG("dropping capabilities\n");
+ 
+ 	blob_buf_init(&b, 0);
+@@ -99,16 +104,73 @@ int drop_capabilities(const char *file)
+ 		}
+ 		capdrop &= ~(1LLU << cap);
+ 	}
++	}
++
++	if (usercaps) {
++		*usercaps = capdrop;
++		if (!uid && (tb[CAP_KEEP] || tb[CAP_DROP])) {
++			capdrop |= (1LLU << CAP_SETGID) | (1LLU << CAP_SETUID) | (1LLU << CAP_SETPCAP) | (1LLU << CAP_DAC_OVERRIDE);
++		}
++		prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0);
++	}
++
++	if (!uid && (tb[CAP_KEEP] || tb[CAP_DROP])) {
++		for (cap = 0; cap <= CAP_LAST_CAP; cap++) {
++			if ( (capdrop & (1LLU << cap)) == 0) {
++				DEBUG("dropping capability %s (%d)\n", capabilities_names[cap], cap);
++				if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)) {
++					ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", cap);
++					return errno;
++				}
++			} else {
++				DEBUG("keeping capability %s (%d)\n", capabilities_names[cap], cap);
++			}
++		}
++	}
++
++	return 0;
++}
++
++int user_capabilities(uint64_t caps, uid_t uid)
++{
++	struct __user_cap_header_struct hdr;
++	struct __user_cap_data_struct data;
++	uint64_t mask;
++	unsigned int i;
++	bool flg = 0;
++
++	hdr.pid = getpid();
++	hdr.version = _LINUX_CAPABILITY_VERSION;
++	data.effective = caps | (1LLU << CAP_SETPCAP) | (1LLU << CAP_DAC_OVERRIDE);
++	data.permitted = caps | (1LLU << CAP_SETPCAP) | (1LLU << CAP_DAC_OVERRIDE);
++	data.inheritable = caps;
++
++	if(capset(&hdr, &data)) {
++		ERROR("capset failed\n");
++		return -1;
++	}
+ 
+-	for (cap = 0; cap <= CAP_LAST_CAP; cap++) {
+-		if ( (capdrop & (1LLU << cap)) == 0) {
+-			DEBUG("dropping capability %s (%d)\n", capabilities_names[cap], cap);
+-			if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)) {
+-				ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", cap);
+-				return errno;
++	for (i = 0; i <= CAP_LAST_CAP; i++) {
++		mask = (1LLU << i);
++		if (mask & caps) {
++			if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, i, 0, 0) < 0) {
++				ERROR("prctl(PR_CAP_AMBIENT, %d) failed: %m\n", i);
++				return -1;
++			}
++		} else if (!uid && (i != CAP_SETPCAP)) {
++			if (prctl(PR_CAPBSET_DROP, i, 0, 0, 0) < 0) {
++				ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", i);
++				return -1;
+ 			}
+ 		} else {
+-			DEBUG("keeping capability %s (%d)\n", capabilities_names[cap], cap);
++			flg = 1;
++		}
++	}
++
++	if (flg) {
++		if (prctl(PR_CAPBSET_DROP, CAP_SETPCAP, 0, 0, 0) < 0) {
++			ERROR("prctl(PR_CAPBSET_DROP, %d) failed: %m\n", CAP_SETPCAP);
++			return -1;
+ 		}
+ 	}
+ 
+Index: procd-2019-05-30-ade00ca5/jail/capabilities.h
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/jail/capabilities.h
++++ procd-2019-05-30-ade00ca5/jail/capabilities.h
+@@ -13,6 +13,7 @@
+ #ifndef _JAIL_CAPABILITIES_H_
+ #define _JAIL_CAPABILITIES_H_
+ 
+-int drop_capabilities(const char *file);
++int drop_capabilities(const char *file, uint64_t *usercaps, uid_t uid);
++int user_capabilities(uint64_t caps, uid_t uid);
+ 
+ #endif
+Index: procd-2019-05-30-ade00ca5/jail/jail.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/jail/jail.c
++++ procd-2019-05-30-ade00ca5/jail/jail.c
+@@ -242,7 +242,7 @@ and will only drop capabilities/apply se
+ 
+ static int exec_jail(void *_notused)
+ {
+-	if (opts.capabilities && drop_capabilities(opts.capabilities))
++	if (opts.capabilities && drop_capabilities(opts.capabilities, NULL, 0))
+ 		exit(EXIT_FAILURE);
+ 
+ 	if (opts.no_new_privs && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+Index: procd-2019-05-30-ade00ca5/service/instance.c
+===================================================================
+--- procd-2019-05-30-ade00ca5.orig/service/instance.c
++++ procd-2019-05-30-ade00ca5/service/instance.c
+@@ -28,6 +28,7 @@
+ #include <unistd.h>
+ #define SYSLOG_NAMES
+ #include <syslog.h>
++#include <grp.h>
+ 
+ #include <libubox/md5.h>
+ 
+@@ -35,6 +36,7 @@
+ 
+ #include "service.h"
+ #include "instance.h"
++#include "../jail/capabilities.h"
+ 
+ 
+ enum {
+@@ -321,7 +323,10 @@ instance_run(struct service_instance *in
+ 	int argc = 1; /* NULL terminated */
+ 	int rem, _stdin;
+ 	bool seccomp = !in->trace && !in->has_jail && in->seccomp;
++	bool capabilities = !in->trace && !in->has_jail && in->capabilities;
+ 	bool setlbf = _stdout >= 0;
++	uint64_t usercaps = 0LLU;
++	struct passwd *p;
+ 
+ 	if (in->nice)
+ 		setpriority(PRIO_PROCESS, 0, in->nice);
+@@ -386,6 +391,18 @@ instance_run(struct service_instance *in
+ 		closefd(_stderr);
+ 	}
+ 
++	if (in->uid) {
++		if ((p = getpwuid(in->uid)) == NULL)
++			exit(EXIT_FAILURE);
++		if (initgroups(p->pw_name, in->gr_gid) != 0)
++			exit(EXIT_FAILURE);
++	}
++
++	if (in->uid || capabilities) {
++		if (drop_capabilities(in->capabilities, &usercaps, in->uid))
++			exit(EXIT_FAILURE);
++	}
++
+ 	if (in->user && in->pw_gid && initgroups(in->user, in->pw_gid)) {
+ 		ERROR("failed to initgroups() for user %s: %m\n", in->user);
+ 		exit(127);
+@@ -399,6 +416,9 @@ instance_run(struct service_instance *in
+ 		exit(127);
+ 	}
+ 
++	if (capabilities || in->uid)
++		user_capabilities(usercaps, in->uid);
++
+ 	execvp(argv[0], argv);
+ 	exit(127);
+ }

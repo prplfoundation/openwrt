@@ -1,0 +1,98 @@
+From e64883e720f0c1739461c37ab796d0b69eff7255 Mon Sep 17 00:00:00 2001
+From: Alexander Abraham <alexander.abraham@intel.com>
+Date: Mon, 22 Jan 2018 12:01:16 +0530
+Subject: [PATCH] UGW_SW-21079: Added patch for env support in jail
+
+Index: procd-2017-08-08-66be6a23/jail/jail.c
+===================================================================
+--- procd-2017-08-08-66be6a23.orig/jail/jail.c
++++ procd-2017-08-08-66be6a23/jail/jail.c
+@@ -36,7 +36,7 @@
+ #include <libubox/uloop.h>
+ 
+ #define STACK_SIZE	(1024 * 1024)
+-#define OPT_ARGS	"S:C:n:h:r:w:d:psuloc"
++#define OPT_ARGS	"L:S:C:n:h:r:w:d:psuloc"
+ 
+ static struct {
+ 	char *name;
+@@ -44,6 +44,7 @@ static struct {
+ 	char **jail_argv;
+ 	char *seccomp;
+ 	char *capabilities;
++	char *env;
+ 	int no_new_privs;
+ 	int namespace;
+ 	int procfs;
+@@ -184,7 +185,7 @@ static int build_jail_fs(void)
+ }
+ 
+ #define MAX_ENVP	8
+-static char** build_envp(const char *seccomp)
++static char** build_envp(const char *seccomp, char *env)
+ {
+ 	static char *envp[MAX_ENVP];
+ 	static char preload_var[PATH_MAX];
+@@ -205,6 +206,8 @@ static char** build_envp(const char *sec
+ 	}
+ 	if (debug > 1)
+ 		envp[count++] = debug_var;
++	if (env) 
++		envp[count++] = env;
+ 
+ 	return envp;
+ }
+@@ -256,7 +259,7 @@ static int exec_jail(void *_notused)
+ 		exit(EXIT_FAILURE);
+ 	}
+ 
+-	char **envp = build_envp(opts.seccomp);
++	char **envp = build_envp(opts.seccomp, opts.env);
+ 	if (!envp)
+ 		exit(EXIT_FAILURE);
+ 
+@@ -346,6 +349,9 @@ int main(int argc, char **argv)
+ 		case 'C':
+ 			opts.capabilities = optarg;
+ 			break;
++		case 'L':
++			opts.env = optarg;
++			break;
+ 		case 'c':
+ 			opts.no_new_privs = 1;
+ 			break;
+Index: procd-2017-08-08-66be6a23/service/instance.c
+===================================================================
+--- procd-2017-08-08-66be6a23.orig/service/instance.c
++++ procd-2017-08-08-66be6a23/service/instance.c
+@@ -181,10 +181,13 @@ instance_limits(const char *limit, const
+ 	}
+ }
+ 
++#define MAX_LEN 64
+ static inline int
+ jail_run(struct service_instance *in, char **argv)
+ {
+ 	struct blobmsg_list_node *var;
++	static char env_var[MAX_LEN] = "";
++	static char env_path[MAX_LEN];
+ 	struct jail *jail = &in->jail;
+ 	int argc = 0;
+ 
+@@ -223,6 +226,16 @@ jail_run(struct service_instance *in, ch
+ 	if (jail->ronly)
+ 		argv[argc++] = "-o";
+ 
++	if (!avl_is_empty(&in->env.avl)) {
++		argv[argc++] = "-L";
++		blobmsg_list_for_each(&in->env, var) {
++			snprintf(env_path, sizeof(env_path), "%s=%s ", (char *) blobmsg_name(var->data),
++				(char *) blobmsg_data(var->data));
++			strcat(env_var, env_path);
++		}
++		argv[argc++] = (char *) env_var;
++	}
++
+ 	blobmsg_list_for_each(&jail->mount, var) {
+ 		const char *type = blobmsg_data(var->data);
+ 

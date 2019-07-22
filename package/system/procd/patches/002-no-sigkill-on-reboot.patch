@@ -1,0 +1,18 @@
+do not send SIGKILL to all processes
+as this results in hanging on FALC-ON systems
+
+--- a/state.c
++++ b/state.c
+@@ -147,10 +147,12 @@ static void state_enter(void)
+ 		kill(-1, SIGTERM);
+ 		sync();
+ 		sleep(1);
++/* after SIGKILL the code for reboot is not reached :-(
+ 		LOG("- SIGKILL processes -\n");
+ 		kill(-1, SIGKILL);
+ 		sync();
+ 		sleep(1);
++*/
+ #ifndef DISABLE_INIT
+ 		if (reboot_event == RB_POWER_OFF)
+ 			LOG("- power down -\n");
