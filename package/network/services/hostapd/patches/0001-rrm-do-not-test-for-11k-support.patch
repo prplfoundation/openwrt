@@ -1,0 +1,71 @@
+From 687e78a66b7d66bd340366495bddd45685bed007 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20M=C3=A9lotte?=
+ <raphael.melotte@essensium.com>
+Date: Mon, 7 Oct 2019 16:53:42 +0200
+Subject: [PATCH] rrm: do not test for 11k support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Some clients do not report that they support 802.11k, even though they
+do support it.
+
+This commit removes the check for 802.11k support before sending a
+beacon request so that all clients get a chance to receive the request.
+
+Signed-off-by: Raphaël Mélotte <raphael.melotte@essensium.com>
+---
+ src/ap/rrm.c | 37 -------------------------------------
+ 1 file changed, 37 deletions(-)
+
+diff --git a/src/ap/rrm.c b/src/ap/rrm.c
+index f2d5cd16e..f31bd6436 100644
+--- a/src/ap/rrm.c
++++ b/src/ap/rrm.c
+@@ -594,43 +594,6 @@ int hostapd_send_beacon_req(struct hostapd_data *hapd, const u8 *addr,
+ 		return -1;
+ 	}
+ 
+-	switch (mode) {
+-	case BEACON_REPORT_MODE_PASSIVE:
+-		if (!(sta->rrm_enabled_capa[0] &
+-		      WLAN_RRM_CAPS_BEACON_REPORT_PASSIVE)) {
+-			wpa_printf(MSG_INFO,
+-				   "Beacon request: " MACSTR
+-				   " does not support passive beacon report",
+-				   MAC2STR(addr));
+-			return -1;
+-		}
+-		break;
+-	case BEACON_REPORT_MODE_ACTIVE:
+-		if (!(sta->rrm_enabled_capa[0] &
+-		      WLAN_RRM_CAPS_BEACON_REPORT_ACTIVE)) {
+-			wpa_printf(MSG_INFO,
+-				   "Beacon request: " MACSTR
+-				   " does not support active beacon report",
+-				   MAC2STR(addr));
+-			return -1;
+-		}
+-		break;
+-	case BEACON_REPORT_MODE_TABLE:
+-		if (!(sta->rrm_enabled_capa[0] &
+-		      WLAN_RRM_CAPS_BEACON_REPORT_TABLE)) {
+-			wpa_printf(MSG_INFO,
+-				   "Beacon request: " MACSTR
+-				   " does not support table beacon report",
+-				   MAC2STR(addr));
+-			return -1;
+-		}
+-		break;
+-	default:
+-		wpa_printf(MSG_INFO,
+-			   "Beacon request: Unknown measurement mode %d", mode);
+-		return -1;
+-	}
+-
+ 	buf = wpabuf_alloc(5 + 2 + 3 + wpabuf_len(req));
+ 	if (!buf)
+ 		return -1;
+-- 
+2.21.0
+
