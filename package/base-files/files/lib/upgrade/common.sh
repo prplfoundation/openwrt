@@ -139,6 +139,11 @@ export_bootdevice() {
 			/dev/*)
 				uevent="/sys/class/block/${rootpart##*/}/../uevent"
 			;;
+			[a-f0-9][a-f0-9][a-f0-9][a-f0-9])
+			    MAJOR=$(echo $((0x${rootpart%[a-f0-9][a-f0-9]})))
+			    MINOR=$(echo $((0x${rootpart#[a-f0-9][a-f0-9]})))
+			    uevent="/sys/dev/block/$MAJOR:$MINOR/../uevent"
+			;;
 		esac
 
 		if [ -e "$uevent" ]; then
